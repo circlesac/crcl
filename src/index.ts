@@ -5,8 +5,9 @@ import { randomBytes } from "node:crypto"
 import { createServer } from "node:http"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import pkg from "../package.json"
 
-const VERSION = "0.0.0" // oneup replaces this at release time
+const VERSION = pkg.version || "0.0.0"
 
 // ── Config ──────────────────────────────────────────────────────────────────
 

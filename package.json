@@ -1,5 +1,6 @@
 {
   "name": "crcl-cli",
+  "version": "0.0.0",
   "description": "Circles CLI — manage orgs, API keys, and authenticate with circles.ac",
   "type": "module",
   "bin": {

@@ -16,15 +16,13 @@ jobs:
       - name: Calculate version
         id: bump
         run: |
-          VERSION=$(npx --yes @circlesac/oneup version --target package.json --target src/index.ts | tail -1)
+          VERSION=$(npx --yes @circlesac/oneup version --target package.json | tail -1)
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4
         with:
           name: versioned-files
-          path: |
-            package.json
-            src/index.ts
+          path: package.json
 
   build:
     needs: version
