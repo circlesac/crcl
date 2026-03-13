@@ -1,0 +1,8 @@
+node_modules/
+bin/native/
+crcl
+crcl.exe
+*.tar.gz
+*.zip
+.claude/settings.local.json
+coverage/

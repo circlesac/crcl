@@ -1,0 +1,36 @@
+class Crcl < Formula
+  desc "Circles CLI — manage orgs, API keys, and authenticate with circles.ac"
+  homepage "https://github.com/circlesac/crcl"
+  version "VERSION_PLACEHOLDER"
+  license "MIT"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/circlesac/crcl/releases/download/v#{version}/crcl-darwin-arm64.tar.gz"
+      sha256 "SHA_DARWIN_ARM64"
+    end
+    on_intel do
+      url "https://github.com/circlesac/crcl/releases/download/v#{version}/crcl-darwin-amd64.tar.gz"
+      sha256 "SHA_DARWIN_AMD64"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/circlesac/crcl/releases/download/v#{version}/crcl-linux-arm64.tar.gz"
+      sha256 "SHA_LINUX_ARM64"
+    end
+    on_intel do
+      url "https://github.com/circlesac/crcl/releases/download/v#{version}/crcl-linux-amd64.tar.gz"
+      sha256 "SHA_LINUX_AMD64"
+    end
+  end
+
+  def install
+    bin.install "crcl"
+  end
+
+  test do
+    system "#{bin}/crcl", "--help"
+  end
+end

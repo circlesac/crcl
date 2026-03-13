@@ -1,0 +1,148 @@
+name: Release
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Calculate version
+        id: bump
+        run: |
+          VERSION=$(npx --yes @circlesac/oneup version --target package.json | tail -1)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: versioned-files
+          path: package.json
+
+  build:
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            bun_target: bun-darwin-arm64
+            name: crcl-darwin-arm64
+          - os: macos-latest
+            bun_target: bun-darwin-x64
+            name: crcl-darwin-amd64
+          - os: ubuntu-latest
+            bun_target: bun-linux-x64
+            name: crcl-linux-amd64
+          - os: ubuntu-latest
+            bun_target: bun-linux-arm64
+            name: crcl-linux-arm64
+          - os: windows-latest
+            bun_target: bun-windows-x64
+            name: crcl-windows-amd64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: versioned-files
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Build
+        run: bun build --compile --target=${{ matrix.bun_target }} src/index.ts --outfile crcl
+
+      - name: Package (Unix)
+        if: matrix.os != 'windows-latest'
+        run: tar czf ${{ matrix.name }}.tar.gz crcl
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        run: 7z a ${{ matrix.name }}.zip crcl.exe
+        shell: bash
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}.*
+
+  github-release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.version.outputs.version }}
+          generate_release_notes: true
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
+            bin/install.sh
+
+  publish-npm:
+    needs: [version, github-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+          registry-url: https://registry.npmjs.org
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: versioned-files
+
+      - run: npm publish --access public
+
+  publish-homebrew:
+    needs: [version, github-release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Update Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION=${{ needs.version.outputs.version }}
+          SHA_DARWIN_ARM64=$(shasum -a 256 artifacts/crcl-darwin-arm64/*.tar.gz | cut -d' ' -f1)
+          SHA_DARWIN_AMD64=$(shasum -a 256 artifacts/crcl-darwin-amd64/*.tar.gz | cut -d' ' -f1)
+          SHA_LINUX_ARM64=$(shasum -a 256 artifacts/crcl-linux-arm64/*.tar.gz | cut -d' ' -f1)
+          SHA_LINUX_AMD64=$(shasum -a 256 artifacts/crcl-linux-amd64/*.tar.gz | cut -d' ' -f1)
+
+          git clone https://x-access-token:${GH_TOKEN}@github.com/circlesac/homebrew-tap.git
+          cd homebrew-tap
+
+          cp ../homebrew/crcl.rb.template Formula/crcl.rb
+          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" Formula/crcl.rb
+          sed -i "s/SHA_DARWIN_ARM64/${SHA_DARWIN_ARM64}/g" Formula/crcl.rb
+          sed -i "s/SHA_DARWIN_AMD64/${SHA_DARWIN_AMD64}/g" Formula/crcl.rb
+          sed -i "s/SHA_LINUX_ARM64/${SHA_LINUX_ARM64}/g" Formula/crcl.rb
+          sed -i "s/SHA_LINUX_AMD64/${SHA_LINUX_AMD64}/g" Formula/crcl.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/crcl.rb
+          git commit -m "Update crcl to ${VERSION}"
+          git push
