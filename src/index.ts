@@ -529,6 +529,39 @@ async function cmdOrgsCreate(config: Config, args: string[]) {
   console.log(`Set as current org: ${org.slug}`)
 }
 
+async function cmdOrgsUpdate(config: Config, opts: { name?: string; slug?: string }) {
+  const body: Record<string, string> = {}
+  if (opts.name) body.name = opts.name
+  if (opts.slug) body.new_slug = opts.slug
+
+  if (Object.keys(body).length === 0) {
+    console.error("Nothing to update. Use --name or --slug.")
+    process.exit(1)
+  }
+
+  const { org_slug } = await resolveOrg(config)
+
+  const { data: updated } = await api<{ id: number; slug: string; name: string }>(
+    config,
+    orgPath(org_slug),
+    { method: "PUT", body }
+  )
+
+  console.log(`Organization updated: ${updated.slug} (${updated.name})`)
+
+  // Update local config if slug changed
+  if (opts.slug && opts.slug !== org_slug) {
+    const current = getDefaultOrg(config)
+    if (current) {
+      const orgs = { ...config.orgs }
+      orgs[current.id] = { ...current.entry, slug: updated.slug }
+      if (config.email) saveAccountConfig(config.email, { orgs })
+      else saveConfig({ orgs })
+      console.log(`Local config updated: ${org_slug} → ${updated.slug}`)
+    }
+  }
+}
+
 async function cmdOrgsSwitch(config: Config, args: string[]) {
   requireAuth(config)
 
@@ -563,13 +596,34 @@ async function cmdOrgsSwitch(config: Config, args: string[]) {
 
 // ── API Keys ────────────────────────────────────────────────────────────────
 
-async function cmdApikeysList(config: Config) {
-  const { org_slug } = await resolveOrg(config)
+function requireScope(opts: { user?: boolean; org?: string }): "user" | "org" {
+  if (opts.user && opts.org) {
+    console.error("Cannot use both --user and --org.")
+    process.exit(1)
+  }
+  if (!opts.user && !opts.org) {
+    console.error("Specify --user or --org <slug>.")
+    process.exit(1)
+  }
+  return opts.user ? "user" : "org"
+}
 
-  const { data: keys } = await api<ApiKey[]>(
-    config,
-    orgPath(org_slug, "api_keys")
-  )
+async function cmdApikeysList(config: Config, opts: { user?: boolean }) {
+  if (opts.user) {
+    requireAuth(config)
+    const { data: keys } = await api<ApiKey[]>(config, "/users/me/api_keys")
+    if (keys.length === 0) { console.log("No user API keys found."); return }
+    console.log(`${"ID".padEnd(12)} ${"Name".padEnd(30)} ${"Key".padEnd(18)} Created`)
+    console.log("─".repeat(80))
+    for (const k of keys) {
+      const date = new Date(k.created_at).toLocaleDateString()
+      console.log(`${k.id.padEnd(12)} ${k.name.padEnd(30)} ${k.masked_key.padEnd(18)} ${date}`)
+    }
+    return
+  }
+
+  const { org_slug } = await resolveOrg(config)
+  const { data: keys } = await api<ApiKey[]>(config, orgPath(org_slug, "api_keys"))
 
   if (keys.length === 0) {
     console.log("No API keys found.")
@@ -584,11 +638,40 @@ async function cmdApikeysList(config: Config) {
   }
 }
 
-async function cmdApikeysCreate(config: Config, args: string[]) {
-  const { org_id, org_slug } = await resolveOrg(config)
+async function cmdApikeysCreate(config: Config, args: string[], opts: { user?: boolean }) {
   const force = args.includes("--force") || args.includes("-y")
   const cleanArgs = args.filter((a) => a !== "--force" && a !== "-y")
   const name = cleanArgs.join(" ") || `crcl-${new Date().toISOString().slice(0, 10)}`
+
+  if (opts.user) {
+    requireAuth(config)
+    const { data: existing } = await api<ApiKey[]>(config, "/users/me/api_keys")
+
+    if (existing.length > 0 && !force) {
+      console.error(`User API key already exists:`)
+      for (const k of existing) console.error(`  ${k.id}  ${k.name}  ${k.masked_key}`)
+      console.error(`\nUse --force or -y to delete existing key(s) and create a new one.`)
+      process.exit(1)
+    }
+
+    if (existing.length > 0 && force) {
+      for (const k of existing) await api(config, `/users/me/api_keys/${encodeURIComponent(k.id)}`, { method: "DELETE" })
+      console.log(`Deleted ${existing.length} existing key(s).`)
+    }
+
+    const { data: key } = await api<{ id: string; key: string; name: string; created_at: string }>(
+      config, "/users/me/api_keys", { method: "POST", body: { name } }
+    )
+
+    console.log(`User API key created:`)
+    console.log(`  ID:   ${key.id}`)
+    console.log(`  Name: ${key.name}`)
+    console.log(`  Key:  ${key.key}`)
+    console.log(`\nSave this key — it won't be shown again.`)
+    return
+  }
+
+  const { org_id, org_slug } = await resolveOrg(config)
 
   // Check for existing keys
   const { data: existing } = await api<ApiKey[]>(
@@ -632,11 +715,18 @@ async function cmdApikeysCreate(config: Config, args: string[]) {
   console.log(`\nSave this key — it won't be shown again.`)
 }
 
-async function cmdApikeysDelete(config: Config, args: string[]) {
+async function cmdApikeysDelete(config: Config, args: string[], opts: { user?: boolean }) {
   const keyId = args[0]
   if (!keyId) {
     console.error("Usage: crcl apikeys delete <key_id>")
     process.exit(1)
+  }
+
+  if (opts.user) {
+    requireAuth(config)
+    await api(config, `/users/me/api_keys/${encodeURIComponent(keyId)}`, { method: "DELETE" })
+    console.log(`User API key ${keyId} deleted.`)
+    return
   }
 
   const { org_id, org_slug } = await resolveOrg(config)
@@ -784,6 +874,15 @@ const orgsCommand = defineCommand({
       },
       async run({ args }) { await cmdOrgsSwitch(loadConfig(args.org), [args.slug]) },
     }),
+    update: defineCommand({
+      meta: { name: "update", description: "Update organization name or slug" },
+      args: {
+        ...orgArg,
+        name: { type: "string" as const, description: "New organization name" },
+        slug: { type: "string" as const, description: "New organization slug" },
+      },
+      async run({ args }) { await cmdOrgsUpdate(loadConfig(args.org), { name: args.name, slug: args.slug }) },
+    }),
   },
 })
 
@@ -804,33 +903,45 @@ const accountsCommand = defineCommand({
   },
 })
 
+const scopeArgs = {
+  user: { type: "boolean" as const, description: "User-level API key" },
+  org: { type: "string" as const, description: "Org-level API key (specify org slug)" },
+}
+
 const apikeysCommand = defineCommand({
-  meta: { name: "apikeys", description: "Manage API keys" },
+  meta: { name: "apikeys", description: "Manage API keys (use --user or --org <slug>)" },
   subCommands: {
     list: defineCommand({
-      meta: { name: "list", description: "List API keys for current org" },
-      args: { ...orgArg },
-      async run({ args }) { await cmdApikeysList(loadConfig(args.org)) },
+      meta: { name: "list", description: "List API keys" },
+      args: { ...scopeArgs },
+      async run({ args }) {
+        const scope = requireScope({ user: args.user, org: args.org })
+        await cmdApikeysList(loadConfig(scope === "org" ? args.org : undefined), { user: scope === "user" })
+      },
     }),
     create: defineCommand({
       meta: { name: "create", description: "Create a new API key" },
       args: {
-        ...orgArg,
+        ...scopeArgs,
         name: { type: "positional" as const, description: "Key name", required: false },
         force: { type: "boolean" as const, alias: "y", description: "Delete existing keys and create new" },
       },
       async run({ args }) {
+        const scope = requireScope({ user: args.user, org: args.org })
         const cmdArgs = [args.name, args.force ? "--force" : ""].filter(Boolean) as string[]
-        await cmdApikeysCreate(loadConfig(args.org), cmdArgs)
+        await cmdApikeysCreate(loadConfig(scope === "org" ? args.org : undefined), cmdArgs, { user: scope === "user" })
       },
     }),
     delete: defineCommand({
       meta: { name: "delete", description: "Delete an API key" },
       args: {
-        ...orgArg,
+        ...scopeArgs,
         key_id: { type: "positional" as const, description: "API key ID", required: true },
       },
-      async run({ args }) { await cmdApikeysDelete(loadConfig(args.org), [args.key_id]) },
+      async run({ args }) {
+        const scope = requireScope({ user: args.user, org: args.org })
+        await cmdApikeysDelete(loadConfig(scope === "org" ? args.org : undefined), [args.key_id], { user: scope === "user" })
+      },
     }),
   },
 })

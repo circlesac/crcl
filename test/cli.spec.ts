@@ -326,10 +326,23 @@ describe("orgs (offline)", () => {
 // ── API Keys (offline) ───────────────────────────────────────────────────
 
 describe("apikeys (offline)", () => {
-  it("apikeys list requires auth", async () => {
-    const { stderr, exitCode } = await crcl(["apikeys", "list"])
+  it("apikeys list --org requires auth", async () => {
+    const { stderr, exitCode } = await crcl(["apikeys", "list", "--org", "acme"])
     expect(exitCode).toBe(1)
     expect(stderr).toContain("Not authenticated")
+  })
+
+  it("apikeys list --user requires auth", async () => {
+    const { stderr, exitCode } = await crcl(["apikeys", "list", "--user"])
+    expect(exitCode).toBe(1)
+    expect(stderr).toContain("Not authenticated")
+  })
+
+  it("apikeys requires --user or --org", async () => {
+    authedConfig()
+    const { stderr, exitCode } = await crcl(["apikeys", "list"])
+    expect(exitCode).toBe(1)
+    expect(stderr).toContain("--user or --org")
   })
 
   it("apikeys delete requires key_id", async () => {
@@ -337,18 +350,10 @@ describe("apikeys (offline)", () => {
       access_token: "test-token",
       orgs: { "1": { slug: "test", default: true } },
     })
-    const { exitCode } = await crcl(["apikeys", "delete"])
+    const { exitCode } = await crcl(["apikeys", "delete", "--org", "test"])
     expect(exitCode).toBe(1)
   })
 
-  it("apikeys requires org selected", async () => {
-    writeTestConfig({
-      accounts: { "test@circles.ac": { access_token: TEST_TOKEN, orgs: { "1": { slug: "test" } }, default: true } },
-    })
-    const { stderr, exitCode } = await crcl(["apikeys", "list"])
-    expect(exitCode).toBe(1)
-    expect(stderr).toContain("No org selected")
-  })
 })
 
 // ── Config & Flags ────────────────────────────────────────────────────────
@@ -478,36 +483,79 @@ describe("orgs (mocked)", () => {
     expect(exitCode).toBe(1)
     expect(stderr).toContain("not found")
   })
+
+  it("orgs update changes name", async () => {
+    authedConfig()
+    mockFetch({
+      "GET /orgs/acme/api_keys": { status: 200, body: [] },
+      "PUT /orgs/acme": { status: 200, body: { id: 1, slug: "acme", name: "New Name", created_at: "2025-01-01T00:00:00Z" } },
+    })
+    const { stdout, exitCode } = await crcl(["orgs", "update", "--name", "New Name"])
+    expect(exitCode).toBe(0)
+    expect(stdout).toContain("Organization updated")
+    expect(stdout).toContain("New Name")
+  })
+
+  it("orgs update changes slug and updates local config", async () => {
+    authedConfig()
+    mockFetch({
+      "GET /orgs/acme/api_keys": { status: 200, body: [] },
+      "PUT /orgs/acme": { status: 200, body: { id: 1, slug: "new-slug", name: "Acme", created_at: "2025-01-01T00:00:00Z" } },
+    })
+    const { stdout, exitCode } = await crcl(["orgs", "update", "--slug", "new-slug"])
+    expect(exitCode).toBe(0)
+    expect(stdout).toContain("Organization updated")
+    expect(stdout).toContain("new-slug")
+    expect(stdout).toContain("Local config updated")
+    const config = readTestConfig()
+    const account = config.accounts["test@circles.ac"]
+    const org = Object.values(account.orgs)[0]
+    expect(org.slug).toBe("new-slug")
+  })
+
+  it("orgs update requires --name or --slug", async () => {
+    authedConfig()
+    const { stderr, exitCode } = await crcl(["orgs", "update"])
+    expect(exitCode).toBe(1)
+    expect(stderr).toContain("Nothing to update")
+  })
 })
 
 // ── API Keys (mocked) ────────────────────────────────────────────────────
 
 describe("apikeys (mocked)", () => {
-  it("apikeys list shows keys", async () => {
+  it("apikeys requires --user or --org", async () => {
+    authedConfig()
+    const { stderr, exitCode } = await crcl(["apikeys", "list"])
+    expect(exitCode).toBe(1)
+    expect(stderr).toContain("--user or --org")
+  })
+
+  it("apikeys list --org shows keys", async () => {
     authedConfig()
     mockFetch({ "GET /orgs/acme/api_keys": { status: 200, body: API_KEYS_RESPONSE } })
-    const { stdout, exitCode } = await crcl(["apikeys", "list"])
+    const { stdout, exitCode } = await crcl(["apikeys", "list", "--org", "acme"])
     expect(exitCode).toBe(0)
     expect(stdout).toContain("k1")
     expect(stdout).toContain("dev-key")
     expect(stdout).toContain("sk_...abc")
   })
 
-  it("apikeys list shows empty message", async () => {
+  it("apikeys list --org shows empty message", async () => {
     authedConfig()
     mockFetch({ "GET /orgs/acme/api_keys": { status: 200, body: [] } })
-    const { stdout, exitCode } = await crcl(["apikeys", "list"])
+    const { stdout, exitCode } = await crcl(["apikeys", "list", "--org", "acme"])
     expect(exitCode).toBe(0)
     expect(stdout).toContain("No API keys found")
   })
 
-  it("apikeys create without existing keys", async () => {
+  it("apikeys create --org without existing keys", async () => {
     authedConfig()
     mockFetch({
       "GET /orgs/acme/api_keys": { status: 200, body: [] },
       "POST /orgs/acme/api_keys": { status: 200, body: { id: "k2", key: "sk_full_key", name: "my-key", created_at: "2025-01-01T00:00:00Z" } },
     })
-    const { stdout, exitCode } = await crcl(["apikeys", "create", "my-key"])
+    const { stdout, exitCode } = await crcl(["apikeys", "create", "--org", "acme", "my-key"])
     expect(exitCode).toBe(0)
     expect(stdout).toContain("API key created")
     expect(stdout).toContain("sk_full_key")
@@ -517,52 +565,89 @@ describe("apikeys (mocked)", () => {
     expect(config.accounts["test@circles.ac"].orgs["10"].api_key).toBe("sk_full_key")
   })
 
-  it("apikeys create blocks when key exists", async () => {
+  it("apikeys create --org blocks when key exists", async () => {
     authedConfig()
     mockFetch({ "GET /orgs/acme/api_keys": { status: 200, body: API_KEYS_RESPONSE } })
-    const { stderr, exitCode } = await crcl(["apikeys", "create"])
+    const { stderr, exitCode } = await crcl(["apikeys", "create", "--org", "acme"])
     expect(exitCode).toBe(1)
     expect(stderr).toContain("API key already exists")
     expect(stderr).toContain("--force")
   })
 
-  it("apikeys create --force deletes existing and creates new", async () => {
+  it("apikeys create --org --force deletes existing and creates new", async () => {
     authedConfig()
     mockFetch({
       "GET /orgs/acme/api_keys": { status: 200, body: API_KEYS_RESPONSE },
       "DELETE /orgs/acme/api_keys/k1": { status: 204 },
       "POST /orgs/acme/api_keys": { status: 200, body: { id: "k3", key: "sk_new", name: "forced", created_at: "2025-06-01T00:00:00Z" } },
     })
-    const { stdout, exitCode } = await crcl(["apikeys", "create", "--force"])
+    const { stdout, exitCode } = await crcl(["apikeys", "create", "--org", "acme", "--force"])
     expect(exitCode).toBe(0)
     expect(stdout).toContain("Deleted 1 existing key(s)")
     expect(stdout).toContain("sk_new")
   })
 
-  it("apikeys create -y shorthand works", async () => {
+  it("apikeys create --org -y shorthand works", async () => {
     authedConfig()
     mockFetch({
       "GET /orgs/acme/api_keys": { status: 200, body: API_KEYS_RESPONSE },
       "DELETE /orgs/acme/api_keys/k1": { status: 204 },
       "POST /orgs/acme/api_keys": { status: 200, body: { id: "k4", key: "sk_y", name: "y-key", created_at: "2025-06-01T00:00:00Z" } },
     })
-    const { stdout, exitCode } = await crcl(["apikeys", "create", "-y"])
+    const { stdout, exitCode } = await crcl(["apikeys", "create", "--org", "acme", "-y"])
     expect(exitCode).toBe(0)
     expect(stdout).toContain("sk_y")
   })
 
-  it("apikeys delete removes key and clears cache", async () => {
+  it("apikeys delete --org removes key and clears cache", async () => {
     authedConfig({ orgs: { "10": { slug: "acme", default: true, api_key: "cached_key" } } })
     mockFetch({
       "GET /orgs/acme/api_keys": { status: 200, body: API_KEYS_RESPONSE },
       "DELETE /orgs/acme/api_keys/k1": { status: 204 },
     })
-    const { stdout, exitCode } = await crcl(["apikeys", "delete", "k1"])
+    const { stdout, exitCode } = await crcl(["apikeys", "delete", "--org", "acme", "k1"])
     expect(exitCode).toBe(0)
     expect(stdout).toContain("API key k1 deleted")
 
     const config = readTestConfig() as { accounts: Record<string, { orgs: Record<string, { api_key?: string }> }> }
     expect(config.accounts["test@circles.ac"].orgs["10"].api_key).toBeUndefined()
+  })
+
+  it("apikeys list --user lists user-level keys", async () => {
+    authedConfig()
+    mockFetch({ "GET /users/me/api_keys": { status: 200, body: [{ id: "uk1", name: "my-user-key", masked_key: "sk_...usr", created_at: "2025-01-01T00:00:00Z" }] } })
+    const { stdout, exitCode } = await crcl(["apikeys", "list", "--user"])
+    expect(exitCode).toBe(0)
+    expect(stdout).toContain("uk1")
+    expect(stdout).toContain("my-user-key")
+  })
+
+  it("apikeys list --user shows empty message", async () => {
+    authedConfig()
+    mockFetch({ "GET /users/me/api_keys": { status: 200, body: [] } })
+    const { stdout, exitCode } = await crcl(["apikeys", "list", "--user"])
+    expect(exitCode).toBe(0)
+    expect(stdout).toContain("No user API keys found")
+  })
+
+  it("apikeys create --user creates user-level key", async () => {
+    authedConfig()
+    mockFetch({
+      "GET /users/me/api_keys": { status: 200, body: [] },
+      "POST /users/me/api_keys": { status: 200, body: { id: "uk2", key: "sk_user_full", name: "user-key", created_at: "2025-01-01T00:00:00Z" } },
+    })
+    const { stdout, exitCode } = await crcl(["apikeys", "create", "--user", "user-key"])
+    expect(exitCode).toBe(0)
+    expect(stdout).toContain("User API key created")
+    expect(stdout).toContain("sk_user_full")
+  })
+
+  it("apikeys delete --user deletes user-level key", async () => {
+    authedConfig()
+    mockFetch({ "DELETE /users/me/api_keys/uk1": { status: 204 } })
+    const { stdout, exitCode } = await crcl(["apikeys", "delete", "--user", "uk1"])
+    expect(exitCode).toBe(0)
+    expect(stdout).toContain("User API key uk1 deleted")
   })
 })
 
@@ -594,7 +679,7 @@ describe("token refresh", () => {
       "POST /token": { status: 401, body: { message: "Invalid refresh token" } },
       "GET /orgs/acme/api_keys": { status: 401, body: { message: "Unauthorized" } },
     })
-    const { stderr, exitCode } = await crcl(["apikeys", "list"])
+    const { stderr, exitCode } = await crcl(["apikeys", "list", "--org", "acme"])
     expect(exitCode).toBe(1)
     expect(stderr).toContain("Session expired")
   })
@@ -703,7 +788,7 @@ describe("error handling", () => {
   it("resolveOrg handles unexpected server error", async () => {
     authedConfig()
     mockFetch({ "GET /orgs/acme/api_keys": { status: 500, body: { message: "Internal Server Error" } } })
-    const { stderr, exitCode } = await crcl(["apikeys", "list"])
+    const { stderr, exitCode } = await crcl(["apikeys", "list", "--org", "acme"])
     expect(exitCode).toBe(1)
     expect(stderr).toContain("Unexpected error (500)")
   })
