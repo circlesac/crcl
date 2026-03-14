@@ -55,6 +55,8 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
 
+      - run: bun install
+
       - name: Build
         run: bun build --compile --target=${{ matrix.bun_target }} src/index.ts --outfile crcl
 
