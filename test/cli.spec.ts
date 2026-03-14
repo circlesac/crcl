@@ -116,11 +116,27 @@ function mockFetch(routes: Record<string, RouteEntry>) {
   }) as unknown as typeof fetch
 }
 
+// Build a fake JWT with an email claim (header.payload.signature)
+function fakeJwt(email: string): string {
+  const header = Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url")
+  const payload = Buffer.from(JSON.stringify({ email })).toString("base64url")
+  return `${header}.${payload}.sig`
+}
+
+const TEST_TOKEN = fakeJwt("test@circles.ac")
+const TEST_TOKEN_2 = fakeJwt("other@circles.ac")
+
 function authedConfig(overrides: Record<string, unknown> = {}) {
+  const { orgs, ...rest } = overrides as Record<string, unknown> & { orgs?: unknown }
   writeTestConfig({
-    access_token: "test-token",
-    orgs: { "10": { slug: "acme", default: true } },
-    ...overrides,
+    accounts: {
+      "test@circles.ac": {
+        access_token: TEST_TOKEN,
+        orgs: orgs ?? { "10": { slug: "acme", default: true } },
+        default: true,
+        ...(rest.refresh_token ? { refresh_token: rest.refresh_token } : {}),
+      },
+    },
   })
 }
 
@@ -149,6 +165,7 @@ describe("help & version (meta)", () => {
     expect(mod.main.meta?.version).toBe("0.0.0")
     expect(mod.main.subCommands).toHaveProperty("login")
     expect(mod.main.subCommands).toHaveProperty("orgs")
+    expect(mod.main.subCommands).toHaveProperty("accounts")
     expect(mod.main.subCommands).toHaveProperty("apikeys")
   })
 })
@@ -168,26 +185,57 @@ describe("auth", () => {
     expect(stdout).toContain("Not logged in")
   })
 
-  it("logout clears tokens", async () => {
+  it("logout removes current account", async () => {
     writeTestConfig({
       api_url: "https://api.circles.ac",
       auth_url: "https://auth.circles.ac",
-      access_token: "test-token",
-      refresh_token: "test-refresh",
-      orgs: { "1": { slug: "test", default: true } },
+      accounts: {
+        "test@circles.ac": { access_token: TEST_TOKEN, default: true },
+      },
     })
 
     const { stdout, exitCode } = await crcl(["logout"])
     expect(exitCode).toBe(0)
     expect(stdout).toContain("Logged out")
 
-    const config = readTestConfig()
-    expect(config.access_token).toBeUndefined()
-    expect(config.refresh_token).toBeUndefined()
-    expect(config.orgs).toBeUndefined()
-    // api_url and auth_url should be preserved
+    const config = readTestConfig() as { accounts?: Record<string, unknown>; api_url?: string }
+    expect(config.accounts).toEqual({})
     expect(config.api_url).toBe("https://api.circles.ac")
-    expect(config.auth_url).toBe("https://auth.circles.ac")
+  })
+
+  it("logout switches to next account when multiple exist", async () => {
+    writeTestConfig({
+      accounts: {
+        "test@circles.ac": { access_token: TEST_TOKEN, default: true },
+        "other@circles.ac": { access_token: TEST_TOKEN_2 },
+      },
+    })
+
+    const { stdout, exitCode } = await crcl(["logout"])
+    expect(exitCode).toBe(0)
+    expect(stdout).toContain("Switched to other@circles.ac")
+
+    const config = readTestConfig() as { accounts: Record<string, { default?: boolean }> }
+    expect(config.accounts["test@circles.ac"]).toBeUndefined()
+    expect(config.accounts["other@circles.ac"].default).toBe(true)
+  })
+
+  it("logout --all removes all accounts", async () => {
+    writeTestConfig({
+      api_url: "https://api.circles.ac",
+      accounts: {
+        "test@circles.ac": { access_token: TEST_TOKEN, default: true },
+        "other@circles.ac": { access_token: TEST_TOKEN_2 },
+      },
+    })
+
+    const { stdout, exitCode } = await crcl(["logout", "--all"])
+    expect(exitCode).toBe(0)
+    expect(stdout).toContain("Logged out of all accounts")
+
+    const config = readTestConfig() as { accounts?: Record<string, unknown>; api_url?: string }
+    expect(config.accounts).toBeUndefined()
+    expect(config.api_url).toBe("https://api.circles.ac")
   })
 
   it("respects CRCL_AUTH_TOKEN env", async () => {
@@ -207,13 +255,13 @@ describe("unknown commands", () => {
   })
 
   it("rejects unknown orgs subcommand", async () => {
-    writeTestConfig({ access_token: "test-token", orgs: {} })
+    writeTestConfig({ accounts: { "test@circles.ac": { access_token: TEST_TOKEN, orgs: {}, default: true } } })
     const { exitCode } = await crcl(["orgs", "foobar"])
     expect(exitCode).toBe(1)
   })
 
   it("rejects unknown apikeys subcommand", async () => {
-    writeTestConfig({ access_token: "test-token", orgs: {} })
+    writeTestConfig({ accounts: { "test@circles.ac": { access_token: TEST_TOKEN, orgs: {}, default: true } } })
     const { exitCode } = await crcl(["apikeys", "foobar"])
     expect(exitCode).toBe(1)
   })
@@ -235,7 +283,7 @@ describe("orgs (offline)", () => {
   })
 
   it("orgs create requires slug", async () => {
-    writeTestConfig({ access_token: "test-token", orgs: {} })
+    writeTestConfig({ accounts: { "test@circles.ac": { access_token: TEST_TOKEN, orgs: {}, default: true } } })
     const { exitCode } = await crcl(["orgs", "create"])
     expect(exitCode).toBe(1)
   })
@@ -247,26 +295,31 @@ describe("orgs (offline)", () => {
   })
 
   it("orgs switch requires slug", async () => {
-    writeTestConfig({ access_token: "test-token", orgs: {} })
+    writeTestConfig({ accounts: { "test@circles.ac": { access_token: TEST_TOKEN, orgs: {}, default: true } } })
     const { exitCode } = await crcl(["orgs", "switch"])
     expect(exitCode).toBe(1)
   })
 
   it("orgs switch finds local org", async () => {
     writeTestConfig({
-      access_token: "test-token",
-      orgs: {
-        "1": { slug: "org-a", default: true },
-        "2": { slug: "org-b" },
+      accounts: {
+        "test@circles.ac": {
+          access_token: TEST_TOKEN,
+          orgs: {
+            "1": { slug: "org-a", default: true },
+            "2": { slug: "org-b" },
+          },
+          default: true,
+        },
       },
     })
     const { stdout, exitCode } = await crcl(["orgs", "switch", "org-b"])
     expect(exitCode).toBe(0)
     expect(stdout).toContain("Switched to org: org-b")
 
-    const config = readTestConfig() as { orgs: Record<string, { default?: boolean }> }
-    expect(config.orgs["1"].default).toBe(false)
-    expect(config.orgs["2"].default).toBe(true)
+    const config = readTestConfig() as { accounts: Record<string, { orgs: Record<string, { default?: boolean }> }> }
+    expect(config.accounts["test@circles.ac"].orgs["1"].default).toBe(false)
+    expect(config.accounts["test@circles.ac"].orgs["2"].default).toBe(true)
   })
 })
 
@@ -290,8 +343,7 @@ describe("apikeys (offline)", () => {
 
   it("apikeys requires org selected", async () => {
     writeTestConfig({
-      access_token: "test-token",
-      orgs: { "1": { slug: "test" } },
+      accounts: { "test@circles.ac": { access_token: TEST_TOKEN, orgs: { "1": { slug: "test" } }, default: true } },
     })
     const { stderr, exitCode } = await crcl(["apikeys", "list"])
     expect(exitCode).toBe(1)
@@ -304,10 +356,12 @@ describe("apikeys (offline)", () => {
 describe("config and flags", () => {
   it("--org flag overrides default org", async () => {
     writeTestConfig({
-      access_token: "test-token",
-      orgs: {
-        "1": { slug: "org-a", default: true },
-        "2": { slug: "org-b" },
+      accounts: {
+        "test@circles.ac": {
+          access_token: TEST_TOKEN,
+          orgs: { "1": { slug: "org-a", default: true }, "2": { slug: "org-b" } },
+          default: true,
+        },
       },
     })
     mockFetch({ "GET /users/me": { status: 200, body: ME_RESPONSE } })
@@ -318,8 +372,13 @@ describe("config and flags", () => {
 
   it("CRCL_ORG env overrides default org", async () => {
     writeTestConfig({
-      access_token: "test-token",
-      orgs: { "1": { slug: "org-a", default: true } },
+      accounts: {
+        "test@circles.ac": {
+          access_token: TEST_TOKEN,
+          orgs: { "1": { slug: "org-a", default: true } },
+          default: true,
+        },
+      },
     })
     mockFetch({ "GET /users/me": { status: 200, body: ME_RESPONSE } })
     const { stdout, exitCode } = await crcl(["whoami"], { CRCL_ORG: "org-b" })
@@ -340,7 +399,7 @@ describe("config and flags", () => {
     mkdirSync(join(xdgHome, "crcl"), { recursive: true })
     writeFileSync(
       join(xdgHome, "crcl", "config.json"),
-      JSON.stringify({ access_token: "xdg-token", orgs: {} })
+      JSON.stringify({ accounts: { "test@circles.ac": { access_token: TEST_TOKEN, orgs: {}, default: true } } })
     )
     mockFetch({ "GET /users/me": { status: 200, body: ME_RESPONSE } })
     const { stdout, exitCode } = await crcl(["whoami"], { XDG_CONFIG_HOME: xdgHome })
@@ -392,10 +451,11 @@ describe("orgs (mocked)", () => {
     expect(stdout).toContain("Organization created: new-org")
     expect(stdout).toContain("Set as current org: new-org")
 
-    const config = readTestConfig() as { orgs: Record<string, { slug: string; default?: boolean }> }
-    expect(config.orgs["30"].slug).toBe("new-org")
-    expect(config.orgs["30"].default).toBe(true)
-    expect(config.orgs["10"].default).toBe(false)
+    const config = readTestConfig() as { accounts: Record<string, { orgs: Record<string, { slug: string; default?: boolean }> }> }
+    const orgs = config.accounts["test@circles.ac"].orgs
+    expect(orgs["30"].slug).toBe("new-org")
+    expect(orgs["30"].default).toBe(true)
+    expect(orgs["10"].default).toBe(false)
   })
 
   it("orgs switch fetches from server when not local", async () => {
@@ -405,9 +465,10 @@ describe("orgs (mocked)", () => {
     expect(exitCode).toBe(0)
     expect(stdout).toContain("Switched to org: beta")
 
-    const config = readTestConfig() as { orgs: Record<string, { slug: string; default?: boolean }> }
-    expect(config.orgs["20"].default).toBe(true)
-    expect(config.orgs["10"].default).toBe(false)
+    const config = readTestConfig() as { accounts: Record<string, { orgs: Record<string, { slug: string; default?: boolean }> }> }
+    const orgs = config.accounts["test@circles.ac"].orgs
+    expect(orgs["20"].default).toBe(true)
+    expect(orgs["10"].default).toBe(false)
   })
 
   it("orgs switch rejects unknown slug", async () => {
@@ -452,8 +513,8 @@ describe("apikeys (mocked)", () => {
     expect(stdout).toContain("sk_full_key")
     expect(stdout).toContain("Save this key")
 
-    const config = readTestConfig() as { orgs: Record<string, { api_key?: string }> }
-    expect(config.orgs["10"].api_key).toBe("sk_full_key")
+    const config = readTestConfig() as { accounts: Record<string, { orgs: Record<string, { api_key?: string }> }> }
+    expect(config.accounts["test@circles.ac"].orgs["10"].api_key).toBe("sk_full_key")
   })
 
   it("apikeys create blocks when key exists", async () => {
@@ -500,8 +561,8 @@ describe("apikeys (mocked)", () => {
     expect(exitCode).toBe(0)
     expect(stdout).toContain("API key k1 deleted")
 
-    const config = readTestConfig() as { orgs: Record<string, { api_key?: string }> }
-    expect(config.orgs["10"].api_key).toBeUndefined()
+    const config = readTestConfig() as { accounts: Record<string, { orgs: Record<string, { api_key?: string }> }> }
+    expect(config.accounts["test@circles.ac"].orgs["10"].api_key).toBeUndefined()
   })
 })
 
@@ -522,9 +583,9 @@ describe("token refresh", () => {
     expect(exitCode).toBe(0)
     expect(stdout).toContain("Test User")
 
-    const config = readTestConfig() as { access_token: string; refresh_token: string }
-    expect(config.access_token).toBe("new-token")
-    expect(config.refresh_token).toBe("new-refresh")
+    const config = readTestConfig() as { accounts: Record<string, { access_token: string; refresh_token: string }> }
+    expect(config.accounts["test@circles.ac"].access_token).toBe("new-token")
+    expect(config.accounts["test@circles.ac"].refresh_token).toBe("new-refresh")
   })
 
   it("exits on expired session (refresh fails)", async () => {
@@ -536,6 +597,103 @@ describe("token refresh", () => {
     const { stderr, exitCode } = await crcl(["apikeys", "list"])
     expect(exitCode).toBe(1)
     expect(stderr).toContain("Session expired")
+  })
+})
+
+// ── Accounts ──────────────────────────────────────────────────────────────
+
+describe("accounts", () => {
+  it("accounts list shows accounts with default marker", async () => {
+    writeTestConfig({
+      accounts: {
+        "test@circles.ac": { access_token: TEST_TOKEN, default: true },
+        "other@circles.ac": { access_token: TEST_TOKEN_2 },
+      },
+    })
+    const { stdout, exitCode } = await crcl(["accounts", "list"])
+    expect(exitCode).toBe(0)
+    expect(stdout).toContain("test@circles.ac *")
+    expect(stdout).toContain("other@circles.ac")
+    expect(stdout).not.toContain("other@circles.ac *")
+  })
+
+  it("accounts list shows empty message", async () => {
+    const { stdout, exitCode } = await crcl(["accounts", "list"])
+    expect(exitCode).toBe(0)
+    expect(stdout).toContain("No accounts")
+  })
+
+  it("accounts switch changes default account", async () => {
+    writeTestConfig({
+      accounts: {
+        "test@circles.ac": { access_token: TEST_TOKEN, default: true },
+        "other@circles.ac": { access_token: TEST_TOKEN_2 },
+      },
+    })
+    const { stdout, exitCode } = await crcl(["accounts", "switch", "other@circles.ac"])
+    expect(exitCode).toBe(0)
+    expect(stdout).toContain("Switched to other@circles.ac")
+
+    const config = readTestConfig() as { accounts: Record<string, { default?: boolean }> }
+    expect(config.accounts["test@circles.ac"].default).toBe(false)
+    expect(config.accounts["other@circles.ac"].default).toBe(true)
+  })
+
+  it("accounts switch rejects unknown email", async () => {
+    writeTestConfig({
+      accounts: {
+        "test@circles.ac": { access_token: TEST_TOKEN, default: true },
+      },
+    })
+    const { stderr, exitCode } = await crcl(["accounts", "switch", "nope@circles.ac"])
+    expect(exitCode).toBe(1)
+    expect(stderr).toContain("not found")
+  })
+})
+
+// ── Config Migration ──────────────────────────────────────────────────────
+
+describe("config migration", () => {
+  it("migrates legacy flat config to accounts structure", async () => {
+    writeTestConfig({
+      api_url: "https://api.circles.ac",
+      access_token: TEST_TOKEN,
+      refresh_token: "old-refresh",
+      orgs: { "1": { slug: "test", default: true } },
+    })
+    mockFetch({ "GET /users/me": { status: 200, body: ME_RESPONSE } })
+
+    const { stdout, exitCode } = await crcl(["whoami"])
+    expect(exitCode).toBe(0)
+    expect(stdout).toContain("Test User")
+
+    // Config should now be in accounts format
+    const config = readTestConfig() as { accounts: Record<string, { access_token: string; orgs: Record<string, unknown> }>; access_token?: string }
+    expect(config.accounts["test@circles.ac"]).toBeDefined()
+    expect(config.accounts["test@circles.ac"].access_token).toBe(TEST_TOKEN)
+    expect(config.access_token).toBeUndefined()
+  })
+})
+
+// ── emailFromJwt ──────────────────────────────────────────────────────────
+
+describe("emailFromJwt", () => {
+  it("extracts email from JWT", async () => {
+    const mod = await import("../src/index")
+    expect(mod.emailFromJwt(TEST_TOKEN)).toBe("test@circles.ac")
+  })
+
+  it("returns null for invalid JWT", async () => {
+    const mod = await import("../src/index")
+    expect(mod.emailFromJwt("not-a-jwt")).toBeNull()
+    expect(mod.emailFromJwt("a.b.c")).toBeNull()
+  })
+
+  it("returns null for JWT without email", async () => {
+    const mod = await import("../src/index")
+    const header = Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url")
+    const payload = Buffer.from(JSON.stringify({ sub: "123" })).toString("base64url")
+    expect(mod.emailFromJwt(`${header}.${payload}.sig`)).toBeNull()
   })
 })
 

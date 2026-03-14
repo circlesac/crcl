@@ -9,6 +9,7 @@ describe("getDefaultOrg", () => {
     access_token: null,
     refresh_token: null,
     orgs: {},
+    email: null,
   }
 
   it("returns null when no orgs", () => {

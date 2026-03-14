@@ -30,12 +30,21 @@ export type OrgEntry = {
   default?: boolean
 }
 
+type AccountEntry = {
+  access_token?: string
+  refresh_token?: string
+  orgs?: Record<string, OrgEntry>
+  default?: boolean
+}
+
 type StoredConfig = {
   api_url?: string
   auth_url?: string
+  accounts?: Record<string, AccountEntry> // keyed by email
+  // Legacy flat fields (pre-migration)
   access_token?: string
   refresh_token?: string
-  orgs?: Record<string, OrgEntry> // keyed by org_id
+  orgs?: Record<string, OrgEntry>
 }
 
 export type Config = {
@@ -44,6 +53,7 @@ export type Config = {
   access_token: string | null
   refresh_token: string | null
   orgs: Record<string, OrgEntry>
+  email: string | null
 }
 
 type UserMe = {
@@ -60,6 +70,35 @@ type ApiKey = {
   created_at: string
 }
 
+export function emailFromJwt(token: string): string | null {
+  try {
+    const payload = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString())
+    return payload.email || null
+  } catch {
+    return null
+  }
+}
+
+function migrateConfig(stored: StoredConfig): StoredConfig {
+  if (stored.accounts || !stored.access_token) return stored
+  const email = emailFromJwt(stored.access_token) || "_unknown"
+  const { access_token, refresh_token, orgs, ...rest } = stored
+  const migrated: StoredConfig = {
+    ...rest,
+    accounts: {
+      [email]: { access_token, refresh_token, orgs, default: true },
+    },
+  }
+  writeFileSync(configFile(), JSON.stringify(migrated, null, 2) + "\n", { mode: 0o600 })
+  return migrated
+}
+
+function getDefaultAccount(stored: StoredConfig): { email: string; account: AccountEntry } | null {
+  if (!stored.accounts) return null
+  const match = Object.entries(stored.accounts).find(([_, a]) => a.default)
+  return match ? { email: match[0], account: match[1] } : null
+}
+
 function loadConfig(orgFlag?: string): Config {
   let stored: StoredConfig = {}
   if (existsSync(configFile())) {
@@ -72,12 +111,16 @@ function loadConfig(orgFlag?: string): Config {
     }
   }
 
+  stored = migrateConfig(stored)
+  const active = getDefaultAccount(stored)
+
   const config: Config = {
     api_url: process.env.CRCL_API_URL || stored.api_url || DEFAULT_API_URL,
     auth_url: process.env.CRCL_AUTH_URL || stored.auth_url || DEFAULT_AUTH_URL,
-    access_token: process.env.CRCL_AUTH_TOKEN || stored.access_token || null,
-    refresh_token: stored.refresh_token || null,
-    orgs: stored.orgs || {},
+    access_token: process.env.CRCL_AUTH_TOKEN || active?.account.access_token || null,
+    refresh_token: active?.account.refresh_token || null,
+    orgs: active?.account.orgs || {},
+    email: active?.email || null,
   }
 
   function overrideOrg(slug: string, key: string) {
@@ -99,17 +142,32 @@ function loadConfig(orgFlag?: string): Config {
   return config
 }
 
-function saveConfig(update: Partial<StoredConfig>) {
-  mkdirSync(configDir(), { recursive: true, mode: 0o700 })
-  let existing: StoredConfig = {}
+function readStoredConfig(): StoredConfig {
   if (existsSync(configFile())) {
     try {
-      existing = JSON.parse(readFileSync(configFile(), "utf-8"))
+      return JSON.parse(readFileSync(configFile(), "utf-8"))
     } catch {
-      // Config corrupted — overwrite with update only
+      return {}
     }
   }
-  writeFileSync(configFile(), JSON.stringify({ ...existing, ...update }, null, 2) + "\n", { mode: 0o600 })
+  return {}
+}
+
+function writeStoredConfig(config: StoredConfig) {
+  mkdirSync(configDir(), { recursive: true, mode: 0o700 })
+  writeFileSync(configFile(), JSON.stringify(config, null, 2) + "\n", { mode: 0o600 })
+}
+
+function saveConfig(update: Partial<StoredConfig>) {
+  const existing = readStoredConfig()
+  writeStoredConfig({ ...existing, ...update })
+}
+
+function saveAccountConfig(email: string, update: Partial<AccountEntry>) {
+  const existing = readStoredConfig()
+  const accounts = existing.accounts || {}
+  accounts[email] = { ...accounts[email], ...update }
+  writeStoredConfig({ ...existing, accounts })
 }
 
 export function getDefaultOrg(config: Config): { id: string; entry: OrgEntry } | null {
@@ -122,7 +180,11 @@ function setDefaultOrg(config: Config, orgId: string) {
   for (const [id, entry] of Object.entries(orgs)) {
     orgs[id] = { ...entry, default: id === orgId }
   }
-  saveConfig({ orgs })
+  if (config.email) {
+    saveAccountConfig(config.email, { orgs })
+  } else {
+    saveConfig({ orgs })
+  }
 }
 
 // ── API Client ──────────────────────────────────────────────────────────────
@@ -143,7 +205,11 @@ async function refreshAccessToken(config: Config): Promise<string | null> {
   if (!res.ok) return null
 
   const data = (await res.json()) as { access_token: string; refresh_token: string }
-  saveConfig({ access_token: data.access_token, refresh_token: data.refresh_token })
+  if (config.email) {
+    saveAccountConfig(config.email, { access_token: data.access_token, refresh_token: data.refresh_token })
+  } else {
+    saveConfig({ access_token: data.access_token, refresh_token: data.refresh_token })
+  }
   config.access_token = data.access_token
   config.refresh_token = data.refresh_token
   return data.access_token
@@ -243,7 +309,8 @@ async function resolveOrg(config: Config): Promise<{ org_id: string; org_slug: s
   if (org) {
     const orgs = { ...config.orgs }
     orgs[current.id] = { ...current.entry, slug: org.slug }
-    saveConfig({ orgs })
+    if (config.email) saveAccountConfig(config.email, { orgs })
+    else saveConfig({ orgs })
     console.error(`Org slug updated: ${current.entry.slug} → ${org.slug}`)
     return { org_id: current.id, org_slug: org.slug }
   }
@@ -254,7 +321,8 @@ async function resolveOrg(config: Config): Promise<{ org_id: string; org_slug: s
     const orgs = { ...config.orgs }
     delete orgs[current.id]
     orgs[String(bySlug.id)] = { ...current.entry, slug: bySlug.slug }
-    saveConfig({ orgs })
+    if (config.email) saveAccountConfig(config.email, { orgs })
+    else saveConfig({ orgs })
     return { org_id: String(bySlug.id), org_slug: bySlug.slug }
   }
 
@@ -345,12 +413,21 @@ async function cmdLogin(config: Config) {
     console.log("\nNo organizations found. Create one with: crcl orgs create <slug> <name>")
   }
 
-  saveConfig({
-    api_url: config.api_url,
-    auth_url: config.auth_url,
+  // Save account keyed by email
+  const existing = readStoredConfig()
+  const accounts = existing.accounts || {}
+  // Clear default from all accounts
+  for (const a of Object.values(accounts)) a.default = false
+  accounts[me.email] = {
     access_token: tokenData.access_token,
     refresh_token: tokenData.refresh_token,
     orgs,
+    default: true,
+  }
+  writeStoredConfig({
+    api_url: config.api_url,
+    auth_url: config.auth_url,
+    accounts,
   })
 
   console.log(`Config saved to ${configFile()}`)
@@ -545,7 +622,8 @@ async function cmdApikeysCreate(config: Config, args: string[]) {
   // Cache api_key in orgs map
   const orgs = { ...config.orgs }
   orgs[org_id] = { ...orgs[org_id], api_key: key.key }
-  saveConfig({ orgs })
+  if (config.email) saveAccountConfig(config.email, { orgs })
+  else saveConfig({ orgs })
 
   console.log(`API key created:`)
   console.log(`  ID:   ${key.id}`)
@@ -571,7 +649,8 @@ async function cmdApikeysDelete(config: Config, args: string[]) {
     const orgs = { ...config.orgs }
     const { api_key: _, ...rest } = orgEntry
     orgs[org_id] = rest
-    saveConfig({ orgs })
+    if (config.email) saveAccountConfig(config.email, { orgs })
+    else saveConfig({ orgs })
   }
 
   console.log(`API key ${keyId} deleted.`)
@@ -585,30 +664,91 @@ async function cmdWhoami(config: Config) {
   const { data: me } = await api<UserMe>(config, "/users/me")
   const current = getDefaultOrg(config)
 
-  console.log(`User:  ${me.name || me.email}`)
-  console.log(`Email: ${me.email}`)
-  if (current) console.log(`Org:   ${current.entry.slug}`)
+  console.log(`User:    ${me.name || me.email}`)
+  console.log(`Email:   ${me.email}`)
+  if (config.email) console.log(`Account: ${config.email}`)
+  if (current) console.log(`Org:     ${current.entry.slug}`)
   if (me.orgs.length > 0) {
-    console.log(`Orgs:  ${me.orgs.map((o) => o.slug).join(", ")}`)
+    console.log(`Orgs:    ${me.orgs.map((o) => o.slug).join(", ")}`)
   }
 }
 
 // ── Logout ──────────────────────────────────────────────────────────────────
 
-function cmdLogout() {
-  if (existsSync(configFile())) {
-    let existing: StoredConfig = {}
-    try {
-      existing = JSON.parse(readFileSync(configFile(), "utf-8"))
-    } catch {
-      // corrupted — just wipe
-    }
-    const { access_token, refresh_token, orgs, ...rest } = existing
-    writeFileSync(configFile(), JSON.stringify(rest, null, 2) + "\n", { mode: 0o600 })
-    console.log("Logged out. Config cleared.")
-  } else {
+function cmdLogout(config: Config, opts: { all?: boolean }) {
+  if (!existsSync(configFile())) {
     console.log("Not logged in.")
+    return
   }
+
+  const stored = readStoredConfig()
+
+  if (opts.all) {
+    // Remove all accounts
+    writeStoredConfig({ api_url: stored.api_url, auth_url: stored.auth_url })
+    console.log("Logged out of all accounts.")
+    return
+  }
+
+  if (!stored.accounts || Object.keys(stored.accounts).length === 0) {
+    writeStoredConfig({ api_url: stored.api_url, auth_url: stored.auth_url })
+    console.log("Logged out.")
+    return
+  }
+
+  // Remove current (default) account
+  const email = config.email
+  if (!email) {
+    console.log("No active account.")
+    return
+  }
+
+  delete stored.accounts[email]
+
+  // If remaining accounts exist, promote the first one as default
+  const remaining = Object.keys(stored.accounts)
+  if (remaining.length > 0) {
+    stored.accounts[remaining[0]].default = true
+    console.log(`Logged out of ${email}. Switched to ${remaining[0]}.`)
+  } else {
+    console.log(`Logged out of ${email}.`)
+  }
+
+  writeStoredConfig(stored)
+}
+
+// ── Accounts ─────────────────────────────────────────────────────────────────
+
+function cmdAccountsList(config: Config) {
+  const stored = readStoredConfig()
+  const accounts = stored.accounts || {}
+  const emails = Object.keys(accounts)
+
+  if (emails.length === 0) {
+    console.log("No accounts. Run: crcl login")
+    return
+  }
+
+  for (const email of emails) {
+    const marker = accounts[email].default ? " *" : ""
+    console.log(`${email}${marker}`)
+  }
+}
+
+function cmdAccountsSwitch(config: Config, email: string) {
+  const stored = readStoredConfig()
+  const accounts = stored.accounts || {}
+
+  if (!accounts[email]) {
+    console.error(`Account '${email}' not found. Your accounts:`)
+    for (const e of Object.keys(accounts)) console.error(`  ${e}`)
+    process.exit(1)
+  }
+
+  for (const a of Object.values(accounts)) a.default = false
+  accounts[email].default = true
+  writeStoredConfig({ ...stored, accounts })
+  console.log(`Switched to ${email}.`)
 }
 
 // ── Commands ─────────────────────────────────────────────────────────────────
@@ -643,6 +783,23 @@ const orgsCommand = defineCommand({
         slug: { type: "positional" as const, description: "Organization slug", required: true },
       },
       async run({ args }) { await cmdOrgsSwitch(loadConfig(args.org), [args.slug]) },
+    }),
+  },
+})
+
+const accountsCommand = defineCommand({
+  meta: { name: "accounts", description: "Manage authenticated accounts" },
+  subCommands: {
+    list: defineCommand({
+      meta: { name: "list", description: "List authenticated accounts" },
+      run() { cmdAccountsList(loadConfig()) },
+    }),
+    switch: defineCommand({
+      meta: { name: "switch", description: "Switch active account" },
+      args: {
+        email: { type: "positional" as const, description: "Account email", required: true },
+      },
+      run({ args }) { cmdAccountsSwitch(loadConfig(), args.email) },
     }),
   },
 })
@@ -692,7 +849,10 @@ export const main = defineCommand({
     }),
     logout: defineCommand({
       meta: { name: "logout", description: "Clear stored credentials" },
-      async run() { cmdLogout() },
+      args: {
+        all: { type: "boolean" as const, description: "Logout of all accounts" },
+      },
+      run({ args }) { cmdLogout(loadConfig(), { all: args.all }) },
     }),
     whoami: defineCommand({
       meta: { name: "whoami", description: "Show current user and org" },
@@ -700,6 +860,7 @@ export const main = defineCommand({
       async run({ args }) { await cmdWhoami(loadConfig(args.org)) },
     }),
     orgs: orgsCommand,
+    accounts: accountsCommand,
     apikeys: apikeysCommand,
   },
 })
