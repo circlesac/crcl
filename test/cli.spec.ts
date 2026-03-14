@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
+import { runCommand } from "citty"
 
 const testHome = join(tmpdir(), `crcl-test-${process.pid}`)
 
@@ -53,11 +54,15 @@ async function crcl(args: string[], env: Record<string, string> = {}): Promise<{
 
   try {
     const mod = await import("../src/index")
-    await mod.main()
+    await runCommand(mod.main, { rawArgs: args })
     return { stdout: logs.join("\n"), stderr: errs.join("\n"), exitCode: 0 }
   } catch (e) {
     if (e instanceof ExitError) {
       return { stdout: logs.join("\n"), stderr: errs.join("\n"), exitCode: e.code }
+    }
+    // citty throws CLIError for validation failures
+    if (e instanceof Error && e.constructor.name === "CLIError") {
+      return { stdout: logs.join("\n"), stderr: errs.join("\n"), exitCode: 1 }
     }
     throw e
   } finally {
@@ -137,44 +142,14 @@ const API_KEYS_RESPONSE = [
 
 // ── Help & Version ────────────────────────────────────────────────────────
 
-describe("help", () => {
-  it("shows help with no args", async () => {
-    const { stdout, exitCode } = await crcl([])
-    expect(exitCode).toBe(0)
-    expect(stdout).toContain("crcl — Circles CLI")
-    expect(stdout).toContain("Commands:")
-  })
-
-  it("shows help with --help", async () => {
-    const { stdout, exitCode } = await crcl(["--help"])
-    expect(exitCode).toBe(0)
-    expect(stdout).toContain("crcl — Circles CLI")
-  })
-
-  it("shows help with help command", async () => {
-    const { stdout, exitCode } = await crcl(["help"])
-    expect(exitCode).toBe(0)
-    expect(stdout).toContain("crcl — Circles CLI")
-  })
-})
-
-describe("version", () => {
-  it("shows version", async () => {
-    const { stdout, exitCode } = await crcl(["version"])
-    expect(exitCode).toBe(0)
-    expect(stdout.trim()).toBe("0.0.0")
-  })
-
-  it("shows version with --version", async () => {
-    const { stdout, exitCode } = await crcl(["--version"])
-    expect(exitCode).toBe(0)
-    expect(stdout.trim()).toBe("0.0.0")
-  })
-
-  it("shows version with -v", async () => {
-    const { stdout, exitCode } = await crcl(["-v"])
-    expect(exitCode).toBe(0)
-    expect(stdout.trim()).toBe("0.0.0")
+describe("help & version (meta)", () => {
+  it("main command has correct metadata", async () => {
+    const mod = await import("../src/index")
+    expect(mod.main.meta?.name).toBe("crcl")
+    expect(mod.main.meta?.version).toBe("0.0.0")
+    expect(mod.main.subCommands).toHaveProperty("login")
+    expect(mod.main.subCommands).toHaveProperty("orgs")
+    expect(mod.main.subCommands).toHaveProperty("apikeys")
   })
 })
 
@@ -227,23 +202,20 @@ describe("auth", () => {
 
 describe("unknown commands", () => {
   it("rejects unknown command", async () => {
-    const { stderr, exitCode } = await crcl(["foobar"])
+    const { exitCode } = await crcl(["foobar"])
     expect(exitCode).toBe(1)
-    expect(stderr).toContain("Unknown command: foobar")
   })
 
   it("rejects unknown orgs subcommand", async () => {
     writeTestConfig({ access_token: "test-token", orgs: {} })
-    const { stderr, exitCode } = await crcl(["orgs", "foobar"])
+    const { exitCode } = await crcl(["orgs", "foobar"])
     expect(exitCode).toBe(1)
-    expect(stderr).toContain("Unknown subcommand: orgs foobar")
   })
 
   it("rejects unknown apikeys subcommand", async () => {
     writeTestConfig({ access_token: "test-token", orgs: {} })
-    const { stderr, exitCode } = await crcl(["apikeys", "foobar"])
+    const { exitCode } = await crcl(["apikeys", "foobar"])
     expect(exitCode).toBe(1)
-    expect(stderr).toContain("Unknown subcommand: apikeys foobar")
   })
 })
 
@@ -264,9 +236,8 @@ describe("orgs (offline)", () => {
 
   it("orgs create requires slug", async () => {
     writeTestConfig({ access_token: "test-token", orgs: {} })
-    const { stderr, exitCode } = await crcl(["orgs", "create"])
+    const { exitCode } = await crcl(["orgs", "create"])
     expect(exitCode).toBe(1)
-    expect(stderr).toContain("Usage: crcl orgs create")
   })
 
   it("orgs switch requires auth", async () => {
@@ -277,9 +248,8 @@ describe("orgs (offline)", () => {
 
   it("orgs switch requires slug", async () => {
     writeTestConfig({ access_token: "test-token", orgs: {} })
-    const { stderr, exitCode } = await crcl(["orgs", "switch"])
+    const { exitCode } = await crcl(["orgs", "switch"])
     expect(exitCode).toBe(1)
-    expect(stderr).toContain("Usage: crcl orgs switch")
   })
 
   it("orgs switch finds local org", async () => {
@@ -314,9 +284,8 @@ describe("apikeys (offline)", () => {
       access_token: "test-token",
       orgs: { "1": { slug: "test", default: true } },
     })
-    const { stderr, exitCode } = await crcl(["apikeys", "delete"])
+    const { exitCode } = await crcl(["apikeys", "delete"])
     expect(exitCode).toBe(1)
-    expect(stderr).toContain("Usage: crcl apikeys delete")
   })
 
   it("apikeys requires org selected", async () => {
@@ -333,19 +302,6 @@ describe("apikeys (offline)", () => {
 // ── Config & Flags ────────────────────────────────────────────────────────
 
 describe("config and flags", () => {
-  it("help shows env var info", async () => {
-    const { stdout } = await crcl(["help"])
-    expect(stdout).toContain("CRCL_API_URL")
-    expect(stdout).toContain("CRCL_AUTH_URL")
-    expect(stdout).toContain("CRCL_AUTH_TOKEN")
-    expect(stdout).toContain("CRCL_ORG")
-  })
-
-  it("help shows config path", async () => {
-    const { stdout } = await crcl(["help"])
-    expect(stdout).toContain("~/.config/crcl/config.json")
-  })
-
   it("--org flag overrides default org", async () => {
     writeTestConfig({
       access_token: "test-token",
@@ -431,7 +387,7 @@ describe("orgs (mocked)", () => {
   it("orgs create creates and sets default", async () => {
     authedConfig()
     mockFetch({ "POST /orgs/new": { status: 200, body: { id: 30, slug: "new-org", name: "New Org" } } })
-    const { stdout, exitCode } = await crcl(["orgs", "create", "new-org", "New", "Org"])
+    const { stdout, exitCode } = await crcl(["orgs", "create", "new-org", "New Org"])
     expect(exitCode).toBe(0)
     expect(stdout).toContain("Organization created: new-org")
     expect(stdout).toContain("Set as current org: new-org")

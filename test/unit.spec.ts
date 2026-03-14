@@ -1,50 +1,6 @@
 import { describe, expect, it } from "vitest"
-import { getDefaultOrg, getFlagValue, stripFlags } from "../src/index"
+import { getDefaultOrg } from "../src/index"
 import type { Config } from "../src/index"
-
-describe("getFlagValue", () => {
-  it("returns value for existing flag", () => {
-    expect(getFlagValue(["--org", "my-org", "list"], "--org")).toBe("my-org")
-  })
-
-  it("returns undefined for missing flag", () => {
-    expect(getFlagValue(["list"], "--org")).toBeUndefined()
-  })
-
-  it("returns undefined when flag has no value", () => {
-    expect(getFlagValue(["--org"], "--org")).toBeUndefined()
-  })
-
-  it("returns first occurrence", () => {
-    expect(getFlagValue(["--org", "first", "--org", "second"], "--org")).toBe("first")
-  })
-
-  it("handles flag at end without value", () => {
-    expect(getFlagValue(["list", "--org"], "--org")).toBeUndefined()
-  })
-})
-
-describe("stripFlags", () => {
-  it("removes flag and its value", () => {
-    expect(stripFlags(["create", "--org", "my-org", "test"], ["--org"])).toEqual(["create", "test"])
-  })
-
-  it("keeps args when no flags present", () => {
-    expect(stripFlags(["create", "test"], ["--org"])).toEqual(["create", "test"])
-  })
-
-  it("handles multiple flags", () => {
-    expect(stripFlags(["--org", "my-org", "--env", "prod", "list"], ["--org", "--env"])).toEqual(["list"])
-  })
-
-  it("handles empty args", () => {
-    expect(stripFlags([], ["--org"])).toEqual([])
-  })
-
-  it("keeps trailing flag without value", () => {
-    expect(stripFlags(["list", "--org"], ["--org"])).toEqual(["list", "--org"])
-  })
-})
 
 describe("getDefaultOrg", () => {
   const baseConfig: Config = {

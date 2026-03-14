@@ -5,6 +5,7 @@ import { randomBytes } from "node:crypto"
 import { createServer } from "node:http"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import { defineCommand, runMain } from "citty"
 import pkg from "../package.json"
 
 const VERSION = pkg.version || "0.0.0"
@@ -13,7 +14,7 @@ const VERSION = pkg.version || "0.0.0"
 
 function configDir() {
   const xdg = process.env.XDG_CONFIG_HOME
-  return join(xdg || join(homedir(), ".config"), "crcl")
+  return join(xdg || join(process.env.HOME || homedir(), ".config"), "crcl")
 }
 function configFile() {
   return join(configDir(), "config.json")
@@ -59,7 +60,7 @@ type ApiKey = {
   created_at: string
 }
 
-function loadConfig(args: string[]): Config {
+function loadConfig(orgFlag?: string): Config {
   let stored: StoredConfig = {}
   if (existsSync(configFile())) {
     try {
@@ -93,7 +94,6 @@ function loadConfig(args: string[]): Config {
   if (process.env.CRCL_ORG) overrideOrg(process.env.CRCL_ORG, "_env")
 
   // --org flag takes highest priority
-  const orgFlag = getFlagValue(args, "--org")
   if (orgFlag) overrideOrg(orgFlag, "_flag")
 
   return config
@@ -611,130 +611,100 @@ function cmdLogout() {
   }
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// ── Commands ─────────────────────────────────────────────────────────────────
 
-export function getFlagValue(args: string[], flag: string): string | undefined {
-  const idx = args.indexOf(flag)
-  if (idx === -1 || idx + 1 >= args.length) return undefined
-  return args[idx + 1]
+const orgArg = {
+  org: { type: "string" as const, description: "Override current org" },
 }
 
-export function stripFlags(args: string[], flags: string[]): string[] {
-  const result: string[] = []
-  let i = 0
-  while (i < args.length) {
-    if (flags.includes(args[i]) && i + 1 < args.length) {
-      i += 2 // skip flag and value
-    } else {
-      result.push(args[i])
-      i++
-    }
-  }
-  return result
-}
+const orgsCommand = defineCommand({
+  meta: { name: "orgs", description: "Manage organizations" },
+  subCommands: {
+    list: defineCommand({
+      meta: { name: "list", description: "List your organizations" },
+      args: { ...orgArg },
+      async run({ args }) { await cmdOrgsList(loadConfig(args.org)) },
+    }),
+    create: defineCommand({
+      meta: { name: "create", description: "Create a new organization" },
+      args: {
+        ...orgArg,
+        slug: { type: "positional" as const, description: "Organization slug", required: true },
+        name: { type: "positional" as const, description: "Organization name", required: false },
+      },
+      async run({ args }) {
+        await cmdOrgsCreate(loadConfig(args.org), [args.slug, args.name].filter(Boolean) as string[])
+      },
+    }),
+    switch: defineCommand({
+      meta: { name: "switch", description: "Switch current organization" },
+      args: {
+        ...orgArg,
+        slug: { type: "positional" as const, description: "Organization slug", required: true },
+      },
+      async run({ args }) { await cmdOrgsSwitch(loadConfig(args.org), [args.slug]) },
+    }),
+  },
+})
 
-// ── Main ────────────────────────────────────────────────────────────────────
+const apikeysCommand = defineCommand({
+  meta: { name: "apikeys", description: "Manage API keys" },
+  subCommands: {
+    list: defineCommand({
+      meta: { name: "list", description: "List API keys for current org" },
+      args: { ...orgArg },
+      async run({ args }) { await cmdApikeysList(loadConfig(args.org)) },
+    }),
+    create: defineCommand({
+      meta: { name: "create", description: "Create a new API key" },
+      args: {
+        ...orgArg,
+        name: { type: "positional" as const, description: "Key name", required: false },
+        force: { type: "boolean" as const, alias: "y", description: "Delete existing keys and create new" },
+      },
+      async run({ args }) {
+        const cmdArgs = [args.name, args.force ? "--force" : ""].filter(Boolean) as string[]
+        await cmdApikeysCreate(loadConfig(args.org), cmdArgs)
+      },
+    }),
+    delete: defineCommand({
+      meta: { name: "delete", description: "Delete an API key" },
+      args: {
+        ...orgArg,
+        key_id: { type: "positional" as const, description: "API key ID", required: true },
+      },
+      async run({ args }) { await cmdApikeysDelete(loadConfig(args.org), [args.key_id]) },
+    }),
+  },
+})
 
-const HELP = `crcl — Circles CLI (${VERSION})
-
-Usage: crcl <command> [args] [--org <slug>]
-
-Commands:
-  login [--org <slug>]       Authenticate via circles.ac
-  logout                     Clear stored credentials
-  whoami                     Show current user and org
-
-  orgs list                  List your organizations
-  orgs create <slug> [name]  Create a new organization
-  orgs switch <slug>         Switch current organization
-
-  apikeys list               List API keys for current org
-  apikeys create [name] [-y]  Create a new API key
-  apikeys delete <key_id>    Delete an API key
-
-  version                    Show version
-  help                       Show this help
-
-Global flags:
-  --org <slug>         Override current org for this command
-
-Environment variables:
-  CRCL_API_URL        API base URL (default: ${DEFAULT_API_URL})
-  CRCL_AUTH_URL       Auth server URL (default: ${DEFAULT_AUTH_URL})
-  CRCL_AUTH_TOKEN     Auth token (overrides config)
-  CRCL_ORG            Organization slug (overrides config)
-
-Config: $XDG_CONFIG_HOME/crcl/config.json (default: ~/.config/crcl/config.json)
-`
-
-export async function main() {
-  const rawArgs = process.argv.slice(2)
-  const positional = stripFlags(rawArgs, ["--org"])
-  const command = positional[0]
-  const subcommand = positional[1]
-
-  if (!command || command === "help" || command === "--help" || command === "-h") {
-    console.log(HELP)
-    return
-  }
-
-  if (command === "version" || command === "--version" || command === "-v") {
-    console.log(VERSION)
-    return
-  }
-
-  const config = loadConfig(rawArgs)
-  const commandArgs = positional.slice(2)
-
-  switch (command) {
-    case "login":
-      return cmdLogin(config)
-    case "logout":
-      return cmdLogout()
-    case "whoami":
-      return cmdWhoami(config)
-
-    case "orgs":
-      switch (subcommand) {
-        case "create":
-          return cmdOrgsCreate(config, commandArgs)
-        case "switch":
-          return cmdOrgsSwitch(config, commandArgs)
-        case "list":
-        case undefined:
-          return cmdOrgsList(config)
-        default:
-          console.error(`Unknown subcommand: orgs ${subcommand}`)
-          process.exit(1)
-      }
-      break
-
-    case "apikeys":
-      switch (subcommand) {
-        case "create":
-          return cmdApikeysCreate(config, commandArgs)
-        case "delete":
-          return cmdApikeysDelete(config, commandArgs)
-        case "list":
-        case undefined:
-          return cmdApikeysList(config)
-        default:
-          console.error(`Unknown subcommand: apikeys ${subcommand}`)
-          process.exit(1)
-      }
-      break
-
-    default:
-      console.error(`Unknown command: ${command}`)
-      console.log(HELP)
-      process.exit(1)
-  }
-}
+export const main = defineCommand({
+  meta: {
+    name: "crcl",
+    version: VERSION,
+    description: "Circles CLI — manage orgs, API keys, and authenticate with circles.ac",
+  },
+  subCommands: {
+    login: defineCommand({
+      meta: { name: "login", description: "Authenticate via circles.ac" },
+      args: { ...orgArg },
+      async run({ args }) { await cmdLogin(loadConfig(args.org)) },
+    }),
+    logout: defineCommand({
+      meta: { name: "logout", description: "Clear stored credentials" },
+      async run() { cmdLogout() },
+    }),
+    whoami: defineCommand({
+      meta: { name: "whoami", description: "Show current user and org" },
+      args: { ...orgArg },
+      async run({ args }) { await cmdWhoami(loadConfig(args.org)) },
+    }),
+    orgs: orgsCommand,
+    apikeys: apikeysCommand,
+  },
+})
 
 // Only run when executed directly (not imported for testing)
 if (import.meta.main) {
-  main().catch((e) => {
-    console.error(e.message)
-    process.exit(1)
-  })
+  runMain(main)
 }
