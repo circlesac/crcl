@@ -33,14 +33,15 @@ export type OrgEntry = {
 type AccountEntry = {
   access_token?: string
   refresh_token?: string
+  api_url?: string
+  auth_url?: string
   orgs?: Record<string, OrgEntry>
-  default?: boolean
 }
 
 type StoredConfig = {
   api_url?: string
   auth_url?: string
-  accounts?: Record<string, AccountEntry> // keyed by email
+  accounts?: Record<string, AccountEntry> // keyed by email or "email [host]"
   // Legacy flat fields (pre-migration)
   access_token?: string
   refresh_token?: string
@@ -54,6 +55,7 @@ export type Config = {
   refresh_token: string | null
   orgs: Record<string, OrgEntry>
   email: string | null
+  account_key: string | null
 }
 
 type UserMe = {
@@ -70,6 +72,14 @@ type ApiKey = {
   created_at: string
 }
 
+type Member = {
+  user_id: number
+  email: string | null
+  name: string | null
+  role: string
+  created_at: string
+}
+
 export function emailFromJwt(token: string): string | null {
   try {
     const payload = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString())
@@ -79,27 +89,87 @@ export function emailFromJwt(token: string): string | null {
   }
 }
 
+export function accountKey(email: string, profile: string = "default"): string {
+  return `${email} [${profile}]`
+}
+
+function emailFromAccountKey(key: string): string {
+  const match = key.match(/^(.+?)\s+\[/)
+  return match ? match[1] : key
+}
+
+function profileFromAccountKey(key: string): string | null {
+  const match = key.match(/\[(.+?)\]$/)
+  return match ? match[1] : null
+}
+
+function resolveAccountKey(keys: string[], target: string): string | undefined {
+  // Numeric index (1-based)
+  const idx = parseInt(target, 10)
+  if (!isNaN(idx) && idx >= 1 && idx <= keys.length) return keys[idx - 1]
+
+  // Exact match
+  const exact = keys.find((k) => k === target)
+  if (exact) return exact
+
+  // Profile name match (e.g. "dev" → "user@test.com [dev]")
+  const byProfile = keys.filter((k) => profileFromAccountKey(k) === target)
+  if (byProfile.length === 1) return byProfile[0]
+
+  // Prefix match
+  const byPrefix = keys.filter((k) => k.startsWith(target))
+  if (byPrefix.length === 1) return byPrefix[0]
+
+  return undefined
+}
+
 function migrateConfig(stored: StoredConfig): StoredConfig {
-  if (stored.accounts || !stored.access_token) return stored
-  const email = emailFromJwt(stored.access_token) || "_unknown"
-  const { access_token, refresh_token, orgs, ...rest } = stored
-  const migrated: StoredConfig = {
-    ...rest,
-    accounts: {
-      [email]: { access_token, refresh_token, orgs, default: true },
-    },
+  if (!stored.access_token && !stored.accounts) return stored
+
+  let changed = false
+
+  // Migrate legacy flat config to accounts structure
+  if (!stored.accounts && stored.access_token) {
+    const email = emailFromJwt(stored.access_token) || "_unknown"
+    const { access_token, refresh_token, orgs, ...rest } = stored
+    const key = accountKey(email)
+    stored = {
+      ...rest,
+      accounts: {
+        [key]: { access_token, refresh_token, orgs },
+      },
+    }
+    changed = true
   }
-  writeFileSync(configFile(), JSON.stringify(migrated, null, 2) + "\n", { mode: 0o600 })
-  return migrated
+
+  // Migrate email-only keys to email [default] format
+  if (stored.accounts) {
+    const migrated: Record<string, AccountEntry> = {}
+    for (const [key, entry] of Object.entries(stored.accounts)) {
+      if (!key.includes("[")) {
+        migrated[accountKey(key)] = entry
+        changed = true
+      } else {
+        migrated[key] = entry
+      }
+    }
+    if (changed) stored = { ...stored, accounts: migrated }
+  }
+
+  if (changed) {
+    writeFileSync(configFile(), JSON.stringify(stored, null, 2) + "\n", { mode: 0o600 })
+  }
+  return stored
 }
 
-function getDefaultAccount(stored: StoredConfig): { email: string; account: AccountEntry } | null {
-  if (!stored.accounts) return null
-  const match = Object.entries(stored.accounts).find(([_, a]) => a.default)
-  return match ? { email: match[0], account: match[1] } : null
+type LoadConfigOpts = {
+  org?: string
+  profile?: string
+  apiUrl?: string
+  authUrl?: string
 }
 
-function loadConfig(orgFlag?: string): Config {
+function loadConfig(opts: LoadConfigOpts = {}): Config {
   let stored: StoredConfig = {}
   if (existsSync(configFile())) {
     try {
@@ -112,15 +182,31 @@ function loadConfig(orgFlag?: string): Config {
   }
 
   stored = migrateConfig(stored)
-  const active = getDefaultAccount(stored)
+
+  // Resolve profile: --profile flag > CRCL_PROFILE env > "default"
+  const profileName = opts.profile || process.env.CRCL_PROFILE || "default"
+  let active: { key: string; account: AccountEntry } | null = null
+
+  if (stored.accounts) {
+    const keys = Object.keys(stored.accounts)
+    const key = resolveAccountKey(keys, profileName)
+    if (key) {
+      active = { key, account: stored.accounts[key] }
+    } else if (opts.profile || process.env.CRCL_PROFILE) {
+      // Only error if explicitly specified (not the implicit "default")
+      console.error(`Profile '${profileName}' not found.`)
+      process.exit(1)
+    }
+  }
 
   const config: Config = {
-    api_url: process.env.CRCL_API_URL || stored.api_url || DEFAULT_API_URL,
-    auth_url: process.env.CRCL_AUTH_URL || stored.auth_url || DEFAULT_AUTH_URL,
+    api_url: opts.apiUrl || process.env.CRCL_API_URL || active?.account.api_url || stored.api_url || DEFAULT_API_URL,
+    auth_url: opts.authUrl || process.env.CRCL_AUTH_URL || active?.account.auth_url || stored.auth_url || DEFAULT_AUTH_URL,
     access_token: process.env.CRCL_AUTH_TOKEN || active?.account.access_token || null,
     refresh_token: active?.account.refresh_token || null,
     orgs: active?.account.orgs || {},
-    email: active?.email || null,
+    email: active ? emailFromAccountKey(active.key) : null,
+    account_key: active?.key || null,
   }
 
   function overrideOrg(slug: string, key: string) {
@@ -137,7 +223,7 @@ function loadConfig(orgFlag?: string): Config {
   if (process.env.CRCL_ORG) overrideOrg(process.env.CRCL_ORG, "_env")
 
   // --org flag takes highest priority
-  if (orgFlag) overrideOrg(orgFlag, "_flag")
+  if (opts.org) overrideOrg(opts.org, "_flag")
 
   return config
 }
@@ -181,7 +267,7 @@ function setDefaultOrg(config: Config, orgId: string) {
     orgs[id] = { ...entry, default: id === orgId }
   }
   if (config.email) {
-    saveAccountConfig(config.email, { orgs })
+    saveAccountConfig(config.account_key!,{ orgs })
   } else {
     saveConfig({ orgs })
   }
@@ -206,7 +292,7 @@ async function refreshAccessToken(config: Config): Promise<string | null> {
 
   const data = (await res.json()) as { access_token: string; refresh_token: string }
   if (config.email) {
-    saveAccountConfig(config.email, { access_token: data.access_token, refresh_token: data.refresh_token })
+    saveAccountConfig(config.account_key!,{ access_token: data.access_token, refresh_token: data.refresh_token })
   } else {
     saveConfig({ access_token: data.access_token, refresh_token: data.refresh_token })
   }
@@ -309,7 +395,7 @@ async function resolveOrg(config: Config): Promise<{ org_id: string; org_slug: s
   if (org) {
     const orgs = { ...config.orgs }
     orgs[current.id] = { ...current.entry, slug: org.slug }
-    if (config.email) saveAccountConfig(config.email, { orgs })
+    if (config.email) saveAccountConfig(config.account_key!,{ orgs })
     else saveConfig({ orgs })
     console.error(`Org slug updated: ${current.entry.slug} → ${org.slug}`)
     return { org_id: current.id, org_slug: org.slug }
@@ -321,7 +407,7 @@ async function resolveOrg(config: Config): Promise<{ org_id: string; org_slug: s
     const orgs = { ...config.orgs }
     delete orgs[current.id]
     orgs[String(bySlug.id)] = { ...current.entry, slug: bySlug.slug }
-    if (config.email) saveAccountConfig(config.email, { orgs })
+    if (config.email) saveAccountConfig(config.account_key!,{ orgs })
     else saveConfig({ orgs })
     return { org_id: String(bySlug.id), org_slug: bySlug.slug }
   }
@@ -332,7 +418,13 @@ async function resolveOrg(config: Config): Promise<{ org_id: string; org_slug: s
 
 // ── Login ───────────────────────────────────────────────────────────────────
 
-async function cmdLogin(config: Config) {
+async function cmdLogin(config: Config, profile: string = "default") {
+  // --profile is required when using custom URLs
+  if ((config.api_url !== DEFAULT_API_URL || config.auth_url !== DEFAULT_AUTH_URL) && profile === "default") {
+    console.error("--profile is required when using --api-url or --auth-url.")
+    console.error("Example: crcl login --api-url https://api-dev.circles.ac --profile dev")
+    process.exit(1)
+  }
   const state = randomBytes(16).toString("hex")
   const { port, waitForCode } = await startCallbackServer(state)
   const redirectUri = `http://localhost:${port}/callback`
@@ -413,22 +505,18 @@ async function cmdLogin(config: Config) {
     console.log("\nNo organizations found. Create one with: crcl orgs create <slug> <name>")
   }
 
-  // Save account keyed by email
+  // Save account keyed by email [profile]
   const existing = readStoredConfig()
   const accounts = existing.accounts || {}
-  // Clear default from all accounts
-  for (const a of Object.values(accounts)) a.default = false
-  accounts[me.email] = {
+  const key = accountKey(me.email, profile)
+  accounts[key] = {
     access_token: tokenData.access_token,
     refresh_token: tokenData.refresh_token,
+    api_url: config.api_url !== DEFAULT_API_URL ? config.api_url : undefined,
+    auth_url: config.auth_url !== DEFAULT_AUTH_URL ? config.auth_url : undefined,
     orgs,
-    default: true,
   }
-  writeStoredConfig({
-    api_url: config.api_url,
-    auth_url: config.auth_url,
-    accounts,
-  })
+  writeStoredConfig({ accounts })
 
   console.log(`Config saved to ${configFile()}`)
 }
@@ -555,7 +643,7 @@ async function cmdOrgsUpdate(config: Config, opts: { name?: string; slug?: strin
     if (current) {
       const orgs = { ...config.orgs }
       orgs[current.id] = { ...current.entry, slug: updated.slug }
-      if (config.email) saveAccountConfig(config.email, { orgs })
+      if (config.email) saveAccountConfig(config.account_key!,{ orgs })
       else saveConfig({ orgs })
       console.log(`Local config updated: ${org_slug} → ${updated.slug}`)
     }
@@ -705,7 +793,7 @@ async function cmdApikeysCreate(config: Config, args: string[], opts: { user?: b
   // Cache api_key in orgs map
   const orgs = { ...config.orgs }
   orgs[org_id] = { ...orgs[org_id], api_key: key.key }
-  if (config.email) saveAccountConfig(config.email, { orgs })
+  if (config.email) saveAccountConfig(config.account_key!,{ orgs })
   else saveConfig({ orgs })
 
   console.log(`API key created:`)
@@ -739,11 +827,67 @@ async function cmdApikeysDelete(config: Config, args: string[], opts: { user?: b
     const orgs = { ...config.orgs }
     const { api_key: _, ...rest } = orgEntry
     orgs[org_id] = rest
-    if (config.email) saveAccountConfig(config.email, { orgs })
+    if (config.email) saveAccountConfig(config.account_key!,{ orgs })
     else saveConfig({ orgs })
   }
 
   console.log(`API key ${keyId} deleted.`)
+}
+
+// ── Members ─────────────────────────────────────────────────────────────────
+
+async function cmdMembersList(config: Config) {
+  const { org_slug } = await resolveOrg(config)
+  const { data: members } = await api<Member[]>(config, orgPath(org_slug, "members"))
+
+  if (members.length === 0) {
+    console.log("No members found.")
+    return
+  }
+
+  console.log(`${"ID".padEnd(8)} ${"Email".padEnd(30)} ${"Name".padEnd(20)} Role`)
+  console.log("─".repeat(72))
+  for (const m of members) {
+    console.log(`${String(m.user_id).padEnd(8)} ${(m.email || "-").padEnd(30)} ${(m.name || "-").padEnd(20)} ${m.role}`)
+  }
+}
+
+async function cmdMembersAdd(config: Config, email: string, role: string) {
+  const { org_slug } = await resolveOrg(config)
+  const { data: member } = await api<Member>(
+    config,
+    orgPath(org_slug, "members"),
+    { method: "POST", body: { email, role } }
+  )
+  console.log(`Added ${member.email} as ${member.role}.`)
+}
+
+async function resolveMemberByEmail(config: Config, org_slug: string, email: string): Promise<Member> {
+  const { data: members } = await api<Member[]>(config, orgPath(org_slug, "members"))
+  const member = members.find((m) => m.email === email)
+  if (!member) {
+    console.error(`Member '${email}' not found in org.`)
+    process.exit(1)
+  }
+  return member
+}
+
+async function cmdMembersRole(config: Config, email: string, role: string) {
+  const { org_slug } = await resolveOrg(config)
+  const existing = await resolveMemberByEmail(config, org_slug, email)
+  const { data: member } = await api<Member>(
+    config,
+    orgPath(org_slug, "members", String(existing.user_id)),
+    { method: "PUT", body: { role } }
+  )
+  console.log(`Updated ${member.email} to ${member.role}.`)
+}
+
+async function cmdMembersRemove(config: Config, email: string) {
+  const { org_slug } = await resolveOrg(config)
+  const existing = await resolveMemberByEmail(config, org_slug, email)
+  await api(config, orgPath(org_slug, "members", String(existing.user_id)), { method: "DELETE" })
+  console.log(`Removed ${email}.`)
 }
 
 // ── Whoami ──────────────────────────────────────────────────────────────────
@@ -756,7 +900,8 @@ async function cmdWhoami(config: Config) {
 
   console.log(`User:    ${me.name || me.email}`)
   console.log(`Email:   ${me.email}`)
-  if (config.email) console.log(`Account: ${config.email}`)
+  if (config.account_key) console.log(`Account: ${config.account_key}`)
+  if (config.api_url !== DEFAULT_API_URL) console.log(`API:     ${config.api_url}`)
   if (current) console.log(`Org:     ${current.entry.slug}`)
   if (me.orgs.length > 0) {
     console.log(`Orgs:    ${me.orgs.map((o) => o.slug).join(", ")}`)
@@ -774,77 +919,41 @@ function cmdLogout(config: Config, opts: { all?: boolean }) {
   const stored = readStoredConfig()
 
   if (opts.all) {
-    // Remove all accounts
-    writeStoredConfig({ api_url: stored.api_url, auth_url: stored.auth_url })
-    console.log("Logged out of all accounts.")
+    writeStoredConfig({})
+    console.log("Logged out of all profiles.")
     return
   }
 
   if (!stored.accounts || Object.keys(stored.accounts).length === 0) {
-    writeStoredConfig({ api_url: stored.api_url, auth_url: stored.auth_url })
+    writeStoredConfig({})
     console.log("Logged out.")
     return
   }
 
-  // Remove current (default) account
-  const email = config.email
-  if (!email) {
-    console.log("No active account.")
+  const key = config.account_key
+  if (!key) {
+    console.log("No active profile.")
     return
   }
 
-  delete stored.accounts[email]
-
-  // If remaining accounts exist, promote the first one as default
-  const remaining = Object.keys(stored.accounts)
-  if (remaining.length > 0) {
-    stored.accounts[remaining[0]].default = true
-    console.log(`Logged out of ${email}. Switched to ${remaining[0]}.`)
-  } else {
-    console.log(`Logged out of ${email}.`)
-  }
-
+  delete stored.accounts[key]
   writeStoredConfig(stored)
-}
 
-// ── Accounts ─────────────────────────────────────────────────────────────────
-
-function cmdAccountsList(config: Config) {
-  const stored = readStoredConfig()
-  const accounts = stored.accounts || {}
-  const emails = Object.keys(accounts)
-
-  if (emails.length === 0) {
-    console.log("No accounts. Run: crcl login")
-    return
-  }
-
-  for (const email of emails) {
-    const marker = accounts[email].default ? " *" : ""
-    console.log(`${email}${marker}`)
-  }
-}
-
-function cmdAccountsSwitch(config: Config, email: string) {
-  const stored = readStoredConfig()
-  const accounts = stored.accounts || {}
-
-  if (!accounts[email]) {
-    console.error(`Account '${email}' not found. Your accounts:`)
-    for (const e of Object.keys(accounts)) console.error(`  ${e}`)
-    process.exit(1)
-  }
-
-  for (const a of Object.values(accounts)) a.default = false
-  accounts[email].default = true
-  writeStoredConfig({ ...stored, accounts })
-  console.log(`Switched to ${email}.`)
+  const profile = profileFromAccountKey(key) || "default"
+  console.log(`Logged out of profile '${profile}'.`)
 }
 
 // ── Commands ─────────────────────────────────────────────────────────────────
 
-const orgArg = {
+const loginArgs = {
   org: { type: "string" as const, description: "Override current org" },
+  "api-url": { type: "string" as const, description: "API URL (e.g. https://api-dev.circles.ac)" },
+  "auth-url": { type: "string" as const, description: "Auth URL (e.g. https://auth-dev.circles.ac)" },
+}
+
+const globalArgs = {
+  org: { type: "string" as const, description: "Override current org" },
+  profile: { type: "string" as const, description: "Use a specific profile (number or name)" },
 }
 
 const orgsCommand = defineCommand({
@@ -852,61 +961,91 @@ const orgsCommand = defineCommand({
   subCommands: {
     list: defineCommand({
       meta: { name: "list", description: "List your organizations" },
-      args: { ...orgArg },
-      async run({ args }) { await cmdOrgsList(loadConfig(args.org)) },
+      args: { ...globalArgs },
+      async run({ args }) { await cmdOrgsList(loadConfig({ org: args.org, profile: args.profile })) },
     }),
     create: defineCommand({
       meta: { name: "create", description: "Create a new organization" },
       args: {
-        ...orgArg,
+        ...globalArgs,
         slug: { type: "positional" as const, description: "Organization slug", required: true },
         name: { type: "positional" as const, description: "Organization name", required: false },
       },
       async run({ args }) {
-        await cmdOrgsCreate(loadConfig(args.org), [args.slug, args.name].filter(Boolean) as string[])
+        await cmdOrgsCreate(loadConfig({ org: args.org, profile: args.profile }), [args.slug, args.name].filter(Boolean) as string[])
       },
     }),
     switch: defineCommand({
       meta: { name: "switch", description: "Switch current organization" },
       args: {
-        ...orgArg,
+        ...globalArgs,
         slug: { type: "positional" as const, description: "Organization slug", required: true },
       },
-      async run({ args }) { await cmdOrgsSwitch(loadConfig(args.org), [args.slug]) },
+      async run({ args }) { await cmdOrgsSwitch(loadConfig({ org: args.org, profile: args.profile }), [args.slug]) },
     }),
     update: defineCommand({
       meta: { name: "update", description: "Update organization name or slug" },
       args: {
-        ...orgArg,
+        ...globalArgs,
         name: { type: "string" as const, description: "New organization name" },
         slug: { type: "string" as const, description: "New organization slug" },
       },
-      async run({ args }) { await cmdOrgsUpdate(loadConfig(args.org), { name: args.name, slug: args.slug }) },
-    }),
-  },
-})
-
-const accountsCommand = defineCommand({
-  meta: { name: "accounts", description: "Manage authenticated accounts" },
-  subCommands: {
-    list: defineCommand({
-      meta: { name: "list", description: "List authenticated accounts" },
-      run() { cmdAccountsList(loadConfig()) },
-    }),
-    switch: defineCommand({
-      meta: { name: "switch", description: "Switch active account" },
-      args: {
-        email: { type: "positional" as const, description: "Account email", required: true },
-      },
-      run({ args }) { cmdAccountsSwitch(loadConfig(), args.email) },
+      async run({ args }) { await cmdOrgsUpdate(loadConfig({ org: args.org, profile: args.profile }), { name: args.name, slug: args.slug }) },
     }),
   },
 })
 
 const scopeArgs = {
+  ...globalArgs,
   user: { type: "boolean" as const, description: "User-level API key" },
-  org: { type: "string" as const, description: "Org-level API key (specify org slug)" },
 }
+
+const membersCommand = defineCommand({
+  meta: { name: "members", description: "Manage organization members" },
+  subCommands: {
+    list: defineCommand({
+      meta: { name: "list", description: "List organization members" },
+      args: { ...globalArgs },
+      async run({ args }) { await cmdMembersList(loadConfig({ org: args.org, profile: args.profile })) },
+    }),
+    add: defineCommand({
+      meta: { name: "add", description: "Add a member to the organization" },
+      args: {
+        ...globalArgs,
+        email: { type: "positional" as const, description: "User email", required: true },
+        role: { type: "string" as const, description: "Role: owner or member (default: member)" },
+      },
+      async run({ args }) {
+        await cmdMembersAdd(loadConfig({ org: args.org, profile: args.profile }), args.email, args.role || "member")
+      },
+    }),
+    role: defineCommand({
+      meta: { name: "role", description: "Change a member's role" },
+      args: {
+        ...globalArgs,
+        email: { type: "positional" as const, description: "Member email", required: true },
+        role: { type: "string" as const, description: "New role: owner or member", required: true },
+      },
+      async run({ args }) {
+        if (!args.role) {
+          console.error("Usage: crcl members role <email> --role <owner|member>")
+          process.exit(1)
+        }
+        await cmdMembersRole(loadConfig({ org: args.org, profile: args.profile }), args.email, args.role)
+      },
+    }),
+    remove: defineCommand({
+      meta: { name: "remove", description: "Remove a member from the organization" },
+      args: {
+        ...globalArgs,
+        email: { type: "positional" as const, description: "Member email", required: true },
+      },
+      async run({ args }) {
+        await cmdMembersRemove(loadConfig({ org: args.org, profile: args.profile }), args.email)
+      },
+    }),
+  },
+})
 
 const apikeysCommand = defineCommand({
   meta: { name: "apikeys", description: "Manage API keys (use --user or --org <slug>)" },
@@ -916,7 +1055,7 @@ const apikeysCommand = defineCommand({
       args: { ...scopeArgs },
       async run({ args }) {
         const scope = requireScope({ user: args.user, org: args.org })
-        await cmdApikeysList(loadConfig(scope === "org" ? args.org : undefined), { user: scope === "user" })
+        await cmdApikeysList(loadConfig({ org: args.org, profile: args.profile }), { user: scope === "user" })
       },
     }),
     create: defineCommand({
@@ -929,7 +1068,7 @@ const apikeysCommand = defineCommand({
       async run({ args }) {
         const scope = requireScope({ user: args.user, org: args.org })
         const cmdArgs = [args.name, args.force ? "--force" : ""].filter(Boolean) as string[]
-        await cmdApikeysCreate(loadConfig(scope === "org" ? args.org : undefined), cmdArgs, { user: scope === "user" })
+        await cmdApikeysCreate(loadConfig({ org: args.org, profile: args.profile }), cmdArgs, { user: scope === "user" })
       },
     }),
     delete: defineCommand({
@@ -940,7 +1079,7 @@ const apikeysCommand = defineCommand({
       },
       async run({ args }) {
         const scope = requireScope({ user: args.user, org: args.org })
-        await cmdApikeysDelete(loadConfig(scope === "org" ? args.org : undefined), [args.key_id], { user: scope === "user" })
+        await cmdApikeysDelete(loadConfig({ org: args.org, profile: args.profile }), [args.key_id], { user: scope === "user" })
       },
     }),
   },
@@ -955,23 +1094,29 @@ export const main = defineCommand({
   subCommands: {
     login: defineCommand({
       meta: { name: "login", description: "Authenticate via circles.ac" },
-      args: { ...orgArg },
-      async run({ args }) { await cmdLogin(loadConfig(args.org)) },
+      args: {
+        ...loginArgs,
+        profile: { type: "string" as const, description: "Profile name (required with --api-url)" },
+      },
+      async run({ args }) {
+        await cmdLogin(loadConfig({ org: args.org, apiUrl: args["api-url"], authUrl: args["auth-url"] }), args.profile)
+      },
     }),
     logout: defineCommand({
       meta: { name: "logout", description: "Clear stored credentials" },
       args: {
-        all: { type: "boolean" as const, description: "Logout of all accounts" },
+        profile: { type: "string" as const, description: "Profile to logout (default: current)" },
+        all: { type: "boolean" as const, description: "Logout of all profiles" },
       },
-      run({ args }) { cmdLogout(loadConfig(), { all: args.all }) },
+      run({ args }) { cmdLogout(loadConfig({ profile: args.profile }), { all: args.all }) },
     }),
     whoami: defineCommand({
       meta: { name: "whoami", description: "Show current user and org" },
-      args: { ...orgArg },
-      async run({ args }) { await cmdWhoami(loadConfig(args.org)) },
+      args: { ...globalArgs },
+      async run({ args }) { await cmdWhoami(loadConfig({ org: args.org, profile: args.profile })) },
     }),
     orgs: orgsCommand,
-    accounts: accountsCommand,
+    members: membersCommand,
     apikeys: apikeysCommand,
   },
 })

@@ -11,3 +11,6 @@ crcl.exe
 
 # Local settings
 .claude/settings.local.json
+
+# Build artifacts (local)
+dist/

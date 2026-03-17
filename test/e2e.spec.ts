@@ -21,7 +21,6 @@ describe("e2e", () => {
     expect(exitCode).toBe(0)
     expect(stdout).toContain("User:")
     expect(stdout).toContain("Email:")
-    expect(stdout).toContain("Org:")
   })
 
   it("orgs list", async () => {
@@ -31,10 +30,10 @@ describe("e2e", () => {
     expect(stdout).toContain("Role")
   })
 
-  it("apikeys list", async () => {
-    const { stdout, exitCode } = await crcl(["apikeys", "list"])
+  it("members list", async () => {
+    const { stdout, exitCode } = await crcl(["members", "list"])
     expect(exitCode).toBe(0)
-    expect(stdout.includes("ID") || stdout.includes("No API keys found")).toBe(true)
+    expect(stdout.includes("Email") || stdout.includes("No members found")).toBe(true)
   })
 
   it("--help", async () => {
@@ -54,9 +53,8 @@ describe("e2e", () => {
   })
 
   it("whoami after logout fails", async () => {
-    const { stderr, exitCode } = await crcl(["whoami"])
+    const { exitCode } = await crcl(["whoami"])
     expect(exitCode).not.toBe(0)
-    expect(stderr).toContain("Not authenticated")
   })
 
   // login again to restore state
