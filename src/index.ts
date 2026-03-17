@@ -26,7 +26,6 @@ const CLIENT_ID = "circles-api"
 
 export type OrgEntry = {
   slug: string
-  api_key?: string
   default?: boolean
 }
 
@@ -473,10 +472,7 @@ async function cmdLogin(config: Config, profile: string = "default") {
 
   for (const o of me.orgs) {
     const existing = config.orgs[String(o.id)]
-    orgs[String(o.id)] = {
-      slug: o.slug,
-      ...(existing?.api_key ? { api_key: existing.api_key } : {}),
-    }
+    orgs[String(o.id)] = { slug: o.slug }
   }
 
   // Set default org
@@ -790,12 +786,6 @@ async function cmdApikeysCreate(config: Config, args: string[], opts: { user?: b
     { method: "POST", body: { name } }
   )
 
-  // Cache api_key in orgs map
-  const orgs = { ...config.orgs }
-  orgs[org_id] = { ...orgs[org_id], api_key: key.key }
-  if (config.email) saveAccountConfig(config.account_key!,{ orgs })
-  else saveConfig({ orgs })
-
   console.log(`API key created:`)
   console.log(`  ID:   ${key.id}`)
   console.log(`  Name: ${key.name}`)
@@ -820,16 +810,6 @@ async function cmdApikeysDelete(config: Config, args: string[], opts: { user?: b
   const { org_id, org_slug } = await resolveOrg(config)
 
   await api(config, orgPath(org_slug, "api_keys", keyId), { method: "DELETE" })
-
-  // Clear cached api_key for this org
-  const orgEntry = config.orgs[org_id]
-  if (orgEntry?.api_key) {
-    const orgs = { ...config.orgs }
-    const { api_key: _, ...rest } = orgEntry
-    orgs[org_id] = rest
-    if (config.email) saveAccountConfig(config.account_key!,{ orgs })
-    else saveConfig({ orgs })
-  }
 
   console.log(`API key ${keyId} deleted.`)
 }

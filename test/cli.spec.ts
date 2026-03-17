@@ -596,9 +596,6 @@ describe("apikeys (mocked)", () => {
     expect(stdout).toContain("API key created")
     expect(stdout).toContain("sk_full_key")
     expect(stdout).toContain("Save this key")
-
-    const config = readTestConfig() as { accounts: Record<string, { orgs: Record<string, { api_key?: string }> }> }
-    expect(config.accounts["test@circles.ac [default]"].orgs["10"].api_key).toBe("sk_full_key")
   })
 
   it("apikeys create --org blocks when key exists", async () => {
@@ -635,8 +632,8 @@ describe("apikeys (mocked)", () => {
     expect(stdout).toContain("sk_y")
   })
 
-  it("apikeys delete --org removes key and clears cache", async () => {
-    authedConfig({ orgs: { "10": { slug: "acme", default: true, api_key: "cached_key" } } })
+  it("apikeys delete --org removes key", async () => {
+    authedConfig()
     mockFetch({
       "GET /orgs/acme/api_keys": { status: 200, body: API_KEYS_RESPONSE },
       "DELETE /orgs/acme/api_keys/k1": { status: 204 },
@@ -644,9 +641,6 @@ describe("apikeys (mocked)", () => {
     const { stdout, exitCode } = await crcl(["apikeys", "delete", "--org", "acme", "k1"])
     expect(exitCode).toBe(0)
     expect(stdout).toContain("API key k1 deleted")
-
-    const config = readTestConfig() as { accounts: Record<string, { orgs: Record<string, { api_key?: string }> }> }
-    expect(config.accounts["test@circles.ac [default]"].orgs["10"].api_key).toBeUndefined()
   })
 
   it("apikeys list --user lists user-level keys", async () => {
