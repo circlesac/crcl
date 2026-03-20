@@ -739,6 +739,35 @@ async function cmdMembersRemove(config: Config, email: string) {
   console.log(`Removed ${email}.`)
 }
 
+// ── Auth Token ─────────────────────────────────────────────────────────────
+
+async function cmdAuthToken(config: Config) {
+  if (!config.access_token && !config.refresh_token) {
+    console.error("Not authenticated. Run: crcl login")
+    process.exit(1)
+  }
+
+  // Check if access token is expired by decoding JWT
+  if (config.access_token) {
+    try {
+      const payload = JSON.parse(Buffer.from(config.access_token.split(".")[1], "base64url").toString())
+      if (payload.exp && payload.exp * 1000 > Date.now()) {
+        process.stdout.write(config.access_token)
+        return
+      }
+    } catch { /* token invalid, try refresh */ }
+  }
+
+  // Token expired or invalid — refresh
+  const newToken = await refreshAccessToken(config)
+  if (!newToken) {
+    console.error("Failed to refresh token. Run: crcl login")
+    process.exit(1)
+  }
+
+  process.stdout.write(newToken)
+}
+
 // ── Whoami ──────────────────────────────────────────────────────────────────
 
 async function cmdWhoami(config: Config) {
@@ -942,6 +971,16 @@ export const main = defineCommand({
       meta: { name: "whoami", description: "Show current user and org" },
       args: { ...globalArgs },
       async run({ args }) { await cmdWhoami(loadConfig({ org: args.org, profile: args.profile })) },
+    }),
+    auth: defineCommand({
+      meta: { name: "auth", description: "Authentication utilities" },
+      subCommands: {
+        token: defineCommand({
+          meta: { name: "token", description: "Print a valid access token (refreshes if expired)" },
+          args: { ...globalArgs },
+          async run({ args }) { await cmdAuthToken(loadConfig({ org: args.org, profile: args.profile })) },
+        }),
+      },
     }),
     orgs: orgsCommand,
     members: membersCommand,
