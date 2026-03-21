@@ -1,6 +1,6 @@
 class Crcl < Formula
   desc "Circles CLI — manage orgs, API keys, and authenticate with circles.ac"
-  homepage "https://github.com/circlesac/crcl"
+  homepage "https://github.com/circlesac/crcl-cli"
   version "VERSION_PLACEHOLDER"
   license "MIT"
 

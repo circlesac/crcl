@@ -778,7 +778,7 @@ async function cmdWhoami(config: Config) {
   console.log(`User:    ${me.name || me.email}`)
   console.log(`Email:   ${me.email}`)
   console.log(`Profile: ${config.profile}`)
-  if (config.api_url !== DEFAULT_API_URL) console.log(`API:     ${config.api_url}`)
+  console.log(`API:     ${config.api_url}`)
   if (config.org) console.log(`Org:     ${config.org}`)
   if (me.orgs.length > 0) {
     console.log(`Orgs:    ${me.orgs.map((o) => o.slug).join(", ")}`)

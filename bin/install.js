@@ -9,7 +9,7 @@ const require = createRequire(import.meta.url);
 const { version } = require("../package.json");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO = "circlesac/crcl";
+const REPO = "circlesac/crcl-cli";
 
 const PLATFORMS = {
   "darwin-x64":    { artifact: "crcl-darwin-amd64",   ext: ".tar.gz" },

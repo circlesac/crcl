@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-REPO="circlesac/crcl"
+REPO="circlesac/crcl-cli"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
