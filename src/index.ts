@@ -321,7 +321,7 @@ async function cmdLogin(config: Config, profile: string = "default") {
   // --profile is required when using custom URLs
   if ((config.api_url !== DEFAULT_API_URL || config.auth_url !== DEFAULT_AUTH_URL) && profile === "default") {
     console.error("--profile is required when using --api-url or --auth-url.")
-    console.error("Example: crcl login --api-url https://api-dev.circles.ac --profile dev")
+    console.error("Example: crcl login --api-url https://api.example.com --profile myprofile")
     process.exit(1)
   }
   const state = randomBytes(16).toString("hex")
@@ -805,8 +805,8 @@ function cmdLogout(config: Config, opts: { all?: boolean }) {
 
 const loginArgs = {
   org: { type: "string" as const, description: "Override current org" },
-  "api-url": { type: "string" as const, description: "API URL (e.g. https://api-dev.circles.ac)" },
-  "auth-url": { type: "string" as const, description: "Auth URL (e.g. https://auth-dev.circles.ac)" },
+  "api-url": { type: "string" as const, description: "API URL (e.g. https://api.example.com)" },
+  "auth-url": { type: "string" as const, description: "Auth URL (e.g. https://auth.example.com)" },
 }
 
 const globalArgs = {
