@@ -60,6 +60,12 @@ jobs:
       - name: Build
         run: bun build --compile --target=${{ matrix.bun_target }} src/index.ts --outfile crcl
 
+      - name: Re-sign darwin binary
+        if: startsWith(matrix.bun_target, 'bun-darwin')
+        run: |
+          codesign --remove-signature crcl
+          codesign --force --deep -s - crcl
+
       - name: Package (Unix)
         if: matrix.os != 'windows-latest'
         run: tar czf ${{ matrix.name }}.tar.gz crcl
